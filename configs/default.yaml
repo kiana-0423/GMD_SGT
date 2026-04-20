@@ -1,0 +1,38 @@
+# GMD-SE3GNN default training configuration
+# Usage: python scripts/train_cli.py --config configs/default.yaml
+
+model:
+  n_species: 100
+  n_blocks: 4
+  scalar_dim: 128
+  irreps: "128x0e + 64x1o + 32x2e"
+  l_max: 2
+  n_basis: 8
+  local_cutoff: 5.0       # Å, short-range cutoff
+  lr_cutoff: 12.0         # Å, long-range cutoff (unused if long_range_type=none)
+  long_range_type: invariant_attention   # none | invariant_attention | equivariant_attention | electrostatic
+  n_heads: 4
+  avg_neighbors: 20.0
+  dropout: 0.0
+
+train:
+  device: cpu             # cpu | cuda | mps
+  n_epochs: 500
+  lr: 3.0e-4
+  lr_min: 3.0e-6
+  weight_decay: 1.0e-5
+  max_grad_norm: 1.0
+  warmup_steps: 1000
+  batch_size: 4
+  val_fraction: 0.10
+  test_fraction: 0.05
+  patience: 50            # EarlyStopping patience (0 = disabled)
+  w_energy: 1.0
+  w_force: 1.0
+  w_stress: 0.0           # set > 0 only for periodic systems with stress labels
+  energy_loss: mae        # mae | mse | huber
+  force_loss: rmse        # rmse | mae | huber
+
+data:
+  train_file: data/train.extxyz   # path to .extxyz or .npz
+  output_dir: outputs/run_001

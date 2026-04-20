@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "gmd-se3gnn"
+version = "0.1.0"
+description = "Unified SE(3)-equivariant machine learning interatomic potential"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "ase>=3.22",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Equivariant tensor products (required for full SE(3) model)
+e3nn = ["e3nn>=0.5"]
+# Fast graph construction
+cluster = ["torch-cluster>=1.6", "torch-scatter>=2.1"]
+# Progress bars
+tqdm = ["tqdm>=4.65"]
+# All optional extras
+full = ["gmd-se3gnn[e3nn,cluster,tqdm]"]
+# Development / testing
+dev = [
+    "gmd-se3gnn[full]",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+gmd-train  = "scripts.train_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gmd_se3gnn*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
+filterwarnings = ["ignore::UserWarning"]
