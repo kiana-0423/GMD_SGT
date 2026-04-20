@@ -1,5 +1,15 @@
 """gmd_se3gnn package."""
 
+from .api import (
+    OnlineMonitoringConfig,
+    OnlineMonitoringEnsembleConfig,
+    OnlinePredictor,
+    PredictionResult,
+    StructureInput,
+    export_model,
+    predict,
+    train,
+)
 from .model import (
     BesselBasis,
     ElectrostaticCorrection,
@@ -19,5 +29,13 @@ __all__ = [
     "EquivariantLongRangeAttention",
     "ElectrostaticCorrection",
     "EquivariantLongRangeBlock",
+    "OnlineMonitoringConfig",
+    "OnlineMonitoringEnsembleConfig",
+    "OnlinePredictor",
+    "PredictionResult",
     "UnifiedEquivariantMLIP",
+    "StructureInput",
+    "export_model",
+    "predict",
+    "train",
 ]

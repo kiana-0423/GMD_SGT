@@ -36,3 +36,16 @@ train:
 data:
   train_file: data/train.extxyz   # path to .extxyz or .npz
   output_dir: outputs/run_001
+
+online_monitoring:
+  enabled: false
+  return_energy: true
+  return_ensemble_forces: false
+  return_latent_descriptor: false
+  return_unsafe_probability: false
+  batch_size: 1
+  device: cpu
+  ensemble:
+    enabled: false
+    members: null
+    checkpoint_paths: []

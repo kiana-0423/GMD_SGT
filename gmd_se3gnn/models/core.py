@@ -296,6 +296,10 @@ class UnifiedEquivariantMLIP(nn.Module):
             )
             if grads[0] is not None:
                 results["forces"] = -grads[0]
+            else:
+                # Early in training the energy head may be position-independent.
+                # Return a stable zero-force tensor instead of dropping the key.
+                results["forces"] = torch.zeros_like(positions)
 
         if compute_stress:
             results["stress"] = None

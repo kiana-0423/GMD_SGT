@@ -8,7 +8,9 @@ Usage
 """
 
 import argparse
-from gmd_se3gnn.inference.export import export_torchscript
+from pathlib import Path
+
+from gmd_se3gnn.api import export_model
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export model to TorchScript for GMD")
@@ -17,4 +19,10 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cpu", help="Export device (default: cpu)")
     args = parser.parse_args()
 
-    export_torchscript(args.checkpoint, args.output, device=args.device)
+    output_path = Path(args.output)
+    exported = export_model(
+        model_path=args.checkpoint,
+        output_dir=output_path.parent,
+        export_config={"device": args.device, "filename": output_path.name},
+    )
+    print(f"Exported model: {exported}")

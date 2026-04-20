@@ -97,7 +97,33 @@ def export_torchscript(
     wrapper = _ScriptWrapper(model)
     wrapper.eval()
 
-    scripted = torch.jit.script(wrapper)
+    example_species = torch.tensor([1, 1], dtype=torch.long, device=device)
+    example_positions = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        dtype=torch.float32,
+        device=device,
+    ).requires_grad_(True)
+    example_edge_index = torch.tensor(
+        [[0, 1], [1, 0]],
+        dtype=torch.long,
+        device=device,
+    )
+    example_edge_shift = torch.zeros((2, 3), dtype=torch.float32, device=device)
+
+    try:
+        scripted = torch.jit.script(wrapper)
+    except Exception:
+        scripted = torch.jit.trace(
+            wrapper,
+            (
+                example_species,
+                example_positions,
+                example_edge_index,
+                example_edge_shift,
+            ),
+            strict=False,
+            check_trace=False,
+        )
     scripted.save(output_path)
 
     print(f"Exported TorchScript model → {output_path}")
