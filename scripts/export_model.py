@@ -10,7 +10,7 @@ Usage
 import argparse
 from pathlib import Path
 
-from gmd_se3gnn.api import export_model
+from gmd_sgt.api import export_model
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export model to TorchScript for GMD")

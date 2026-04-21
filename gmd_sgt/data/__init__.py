@@ -1,4 +1,4 @@
-"""Data loading and preprocessing for GMD-SE3GNN."""
+"""Data loading and preprocessing for GMD-SGT."""
 
 from .dataset import AtomicDataset, collate_fn
 from .reader import read_extxyz, read_npz

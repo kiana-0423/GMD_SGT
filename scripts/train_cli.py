@@ -6,11 +6,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from gmd_se3gnn.api import load_config, train
+from gmd_sgt.api import load_config, train
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train GMD-SE3GNN MLIP")
+    parser = argparse.ArgumentParser(description="Train GMD-SGT MLIP")
     parser.add_argument("--config",  required=True, help="Path to YAML config file")
     parser.add_argument("--device",  default=None,  help="Override device (cpu/cuda/mps)")
     parser.add_argument("--resume",  default=None,  help="Path to checkpoint to resume from")

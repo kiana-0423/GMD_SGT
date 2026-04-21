@@ -46,7 +46,7 @@ def model_config():
 @pytest.fixture(scope="module")
 def checkpoint_path(model_config, tmp_path_factory):
     """Write a minimal checkpoint to a temp file."""
-    from gmd_se3gnn.model import UnifiedEquivariantMLIP
+    from gmd_sgt.model import UnifiedEquivariantMLIP
 
     model = UnifiedEquivariantMLIP(**model_config)
     tmp = tmp_path_factory.mktemp("ckpt") / "ckpt_test.pt"
@@ -63,7 +63,7 @@ def checkpoint_path(model_config, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def calculator(checkpoint_path):
-    from gmd_se3gnn.inference import MLIPCalculator
+    from gmd_sgt.inference import MLIPCalculator
     return MLIPCalculator.from_checkpoint(checkpoint_path, device="cpu")
 
 
@@ -88,13 +88,13 @@ def _water_cluster():
 class TestFromCheckpoint:
 
     def test_loads_without_error(self, checkpoint_path):
-        from gmd_se3gnn.inference import MLIPCalculator
+        from gmd_sgt.inference import MLIPCalculator
         calc = MLIPCalculator.from_checkpoint(checkpoint_path)
         assert calc is not None
 
     def test_missing_model_config_raises(self, tmp_path):
         """Checkpoint without model_config must raise KeyError."""
-        from gmd_se3gnn.inference import MLIPCalculator
+        from gmd_sgt.inference import MLIPCalculator
         bad_ckpt = str(tmp_path / "bad.pt")
         torch.save({"epoch": 0, "model_state_dict": {}}, bad_ckpt)
         with pytest.raises(KeyError, match="model_config"):
@@ -177,14 +177,14 @@ class TestCompute:
 class TestTorchScriptExport:
 
     def test_export_produces_file(self, checkpoint_path, tmp_path):
-        from gmd_se3gnn.inference.export import export_torchscript
+        from gmd_sgt.inference.export import export_torchscript
         out = str(tmp_path / "model.pt")
         export_torchscript(checkpoint_path, out, device="cpu")
         assert os.path.exists(out)
         assert os.path.getsize(out) > 0
 
     def test_exported_model_runs(self, checkpoint_path, tmp_path):
-        from gmd_se3gnn.inference.export import export_torchscript
+        from gmd_sgt.inference.export import export_torchscript
         out = str(tmp_path / "model.pt")
         export_torchscript(checkpoint_path, out, device="cpu")
 
@@ -205,8 +205,8 @@ class TestTorchScriptExport:
 
     def test_export_output_matches_eager(self, checkpoint_path, tmp_path):
         """TorchScript forward must match eager MLIPCalculator output."""
-        from gmd_se3gnn.inference import MLIPCalculator
-        from gmd_se3gnn.inference.export import export_torchscript
+        from gmd_sgt.inference import MLIPCalculator
+        from gmd_sgt.inference.export import export_torchscript
 
         calc = MLIPCalculator.from_checkpoint(checkpoint_path)
         species, positions = _water_cluster()

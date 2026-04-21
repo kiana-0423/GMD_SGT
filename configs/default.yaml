@@ -1,4 +1,4 @@
-# GMD-SE3GNN default training configuration
+# GMD-SGT default training configuration
 # Usage: python scripts/train_cli.py --config configs/default.yaml
 
 model:

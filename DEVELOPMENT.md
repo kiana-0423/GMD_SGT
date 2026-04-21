@@ -1,4 +1,4 @@
-# GMD-SE3GNN Release Note
+# GMD-SGT Release Note
 
 ## Version
 
@@ -6,7 +6,7 @@
 
 ## 概述
 
-`v0.1` 是 GMD-SE3GNN 的首个发布版本。本版本的目标不是覆盖全部高级功能，而是完成一条清晰、可维护、可继续扩展的主链路：
+`v0.1` 是 GMD-SGT 的首个发布版本。本版本的目标不是覆盖全部高级功能，而是完成一条清晰、可维护、可继续扩展的主链路：
 
 - 数据读取
 - 模型训练
@@ -110,7 +110,7 @@ python scripts/export_model.py --checkpoint outputs/run/ckpt_best.pt --output mo
 ### Python 推理
 
 ```python
-from gmd_se3gnn.inference import MLIPCalculator
+from gmd_sgt.inference import MLIPCalculator
 
 calc = MLIPCalculator.from_checkpoint("outputs/run/ckpt_best.pt", device="cpu")
 ```

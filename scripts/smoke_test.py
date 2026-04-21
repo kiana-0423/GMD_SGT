@@ -15,8 +15,8 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 
-from gmd_se3gnn.model import UnifiedEquivariantMLIP
-from gmd_se3gnn.training import EnergyForceLoss
+from gmd_sgt.model import UnifiedEquivariantMLIP
+from gmd_sgt.training import EnergyForceLoss
 
 
 def make_dummy_batch(

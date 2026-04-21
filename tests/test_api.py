@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 import torch
 
-from gmd_se3gnn.api import OnlinePredictor, export_model, predict, train
-from gmd_se3gnn.model import UnifiedEquivariantMLIP
-from gmd_se3gnn.training.trainer import Trainer
+from gmd_sgt.api import OnlinePredictor, export_model, predict, train
+from gmd_sgt.model import UnifiedEquivariantMLIP
+from gmd_sgt.training.trainer import Trainer
 
 
 @pytest.fixture(scope="module")

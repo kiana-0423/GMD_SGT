@@ -25,7 +25,7 @@ import torch
 
 def _small_model():
     """Minimal model for fast testing (no e3nn / torch_cluster required)."""
-    from gmd_se3gnn.model import UnifiedEquivariantMLIP
+    from gmd_sgt.model import UnifiedEquivariantMLIP
     return UnifiedEquivariantMLIP(
         n_species=10,
         n_blocks=1,

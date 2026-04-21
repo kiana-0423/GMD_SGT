@@ -1,4 +1,4 @@
-"""Training utilities for GMD-SE3GNN."""
+"""Training utilities for GMD-SGT."""
 
 from .loss import EnergyForceLoss
 from .trainer import Trainer

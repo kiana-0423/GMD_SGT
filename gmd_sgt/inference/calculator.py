@@ -10,7 +10,7 @@ libtorch; this file is NOT in the hot path during a real MD run.
 
 Usage
 -----
-  from gmd_se3gnn.inference import MLIPCalculator
+  from gmd_sgt.inference import MLIPCalculator
 
   calc = MLIPCalculator.from_checkpoint("outputs/run/ckpt_best.pt", device="cpu")
   print("cutoff:", calc.cutoff)
@@ -30,7 +30,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from gmd_se3gnn.model import UnifiedEquivariantMLIP
+from gmd_sgt.model import UnifiedEquivariantMLIP
 
 
 class MLIPCalculator:
@@ -57,7 +57,7 @@ class MLIPCalculator:
         """Load a checkpoint saved by Trainer.save_checkpoint().
 
         The checkpoint must contain a 'model_config' key (guaranteed by
-        Trainer in gmd_se3gnn.training.trainer).
+        Trainer in gmd_sgt.training.trainer).
         """
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         if "model_config" not in ckpt:

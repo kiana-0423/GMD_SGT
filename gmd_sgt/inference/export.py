@@ -24,7 +24,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from gmd_se3gnn.model import UnifiedEquivariantMLIP
+from gmd_sgt.model import UnifiedEquivariantMLIP
 
 
 class _ScriptWrapper(nn.Module):

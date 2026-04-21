@@ -17,16 +17,16 @@ try:
 except ImportError as exc:  # pragma: no cover - declared dependency
     raise ImportError("pyyaml is required for configuration support") from exc
 
-from gmd_se3gnn.data import (
+from gmd_sgt.data import (
     AtomicDataset,
     collate_fn,
     compute_per_species_energy_shift,
     split_dataset,
 )
-from gmd_se3gnn.inference.calculator import MLIPCalculator
-from gmd_se3gnn.inference.export import export_torchscript
-from gmd_se3gnn.model import UnifiedEquivariantMLIP
-from gmd_se3gnn.training import EnergyForceLoss, Trainer
+from gmd_sgt.inference.calculator import MLIPCalculator
+from gmd_sgt.inference.export import export_torchscript
+from gmd_sgt.model import UnifiedEquivariantMLIP
+from gmd_sgt.training import EnergyForceLoss, Trainer
 
 LOGGER = logging.getLogger(__name__)
 

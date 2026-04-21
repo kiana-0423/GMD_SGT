@@ -1,4 +1,4 @@
-"""gmd_se3gnn package."""
+"""gmd_sgt package."""
 
 from .api import (
     OnlineMonitoringConfig,

@@ -1,6 +1,6 @@
-# GMD-SE3GNN v0.2
+# GMD-SGT v0.2
 
-GMD-SE3GNN 是一个面向原子体系建模的 SE(3)/E(3) 等变机器学习势能项目，目标是同时支持训练、推理、TorchScript 导出，以及与外部分子动力学程序的集成。
+GMD-SGT 是一个面向原子体系建模的 SE(3)/E(3) 等变机器学习势能项目，目标是同时支持训练、推理、TorchScript 导出，以及与外部分子动力学程序的集成。
 
 ## Release Note
 
@@ -34,7 +34,7 @@ GMD-SE3GNN 是一个面向原子体系建模的 SE(3)/E(3) 等变机器学习势
 ## 目录结构
 
 ```text
-gmd_se3gnn/
+gmd_sgt/
   data/         # 数据读取、切分、统计、dataset
   inference/    # 推理接口、TorchScript 导出
   models/       # 模型主体、消息传递、长程模块、PBC 邻居图
@@ -114,7 +114,7 @@ python scripts/train_cli.py --config configs/default.yaml --resume outputs/run/c
 稳定 Python API：
 
 ```python
-from gmd_se3gnn.api import train
+from gmd_sgt.api import train
 
 best_checkpoint = train(
     dataset_path="data/train.extxyz",
@@ -139,7 +139,7 @@ python scripts/export_model.py --checkpoint outputs/run/ckpt_best.pt --output mo
 稳定 Python API：
 
 ```python
-from gmd_se3gnn.api import export_model
+from gmd_sgt.api import export_model
 
 artifact_path = export_model(
     model_path="outputs/run/ckpt_best.pt",
@@ -152,7 +152,7 @@ print(artifact_path)
 ### 5. Python 推理
 
 ```python
-from gmd_se3gnn.api import OnlinePredictor
+from gmd_sgt.api import OnlinePredictor
 import numpy as np
 
 predictor = OnlinePredictor.from_checkpoint(
@@ -189,7 +189,7 @@ print(result.ensemble_forces)
 ### 6. ASE 接口
 
 ```python
-from gmd_se3gnn.inference import MLIPCalculator
+from gmd_sgt.inference import MLIPCalculator
 
 calc = MLIPCalculator.from_checkpoint("outputs/run/ckpt_best.pt", device="cpu")
 atoms.calc = calc.get_ase_calculator()
@@ -199,10 +199,10 @@ forces = atoms.get_forces()
 
 ## 在线监督接口
 
-推荐外部 adapter 直接调用 `gmd_se3gnn.api`：
+推荐外部 adapter 直接调用 `gmd_sgt.api`：
 
 ```python
-from gmd_se3gnn.api import OnlinePredictor, export_model, train
+from gmd_sgt.api import OnlinePredictor, export_model, train
 ```
 
 关键接口签名：

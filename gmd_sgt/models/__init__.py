@@ -1,4 +1,4 @@
-"""Modular model components for GMD-SE3GNN."""
+"""Modular model components for GMD-SGT."""
 
 from .blocks import EquivariantLongRangeBlock
 from .core import UnifiedEquivariantMLIP
