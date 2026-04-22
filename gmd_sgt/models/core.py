@@ -38,8 +38,14 @@ class UnifiedEquivariantMLIP(nn.Module):
         self.lr_cutoff = lr_cutoff
         self.long_range_type = long_range_type
         self.l_max = l_max
+        self._use_e3nn = E3NN_AVAILABLE
 
         self.species_embedding = nn.Embedding(n_species, scalar_dim, padding_idx=0)
+        if self._use_e3nn:
+            irr = o3.Irreps(irreps)
+            self.input_proj = nn.Linear(scalar_dim, irr.dim)
+        else:
+            self.input_proj = None
 
         self.radial_basis = BesselBasis(local_cutoff, n_basis)
         self.cutoff_env = PolynomialCutoff(local_cutoff)
@@ -165,6 +171,7 @@ class UnifiedEquivariantMLIP(nn.Module):
         """
         try:
             import numpy as np
+            from ase import Atoms
             from ase.neighborlist import neighbor_list as ase_nl
         except ImportError as exc:
             raise ImportError(
@@ -177,14 +184,10 @@ class UnifiedEquivariantMLIP(nn.Module):
         pos_np = positions.detach().cpu().numpy()
         cell_np = cell.detach().cpu().numpy()
 
-        # ase_nl returns (i, j, S) where S[k] is integer lattice-vector indices
-        i_idx, j_idx, S = ase_nl(
-            "ijS",
-            pbc=[True, True, True],
-            cell=cell_np,
-            positions=pos_np,
-            cutoff=cutoff,
-        )
+        # Use Atoms-based signature for ASE version compatibility.
+        atoms = Atoms(positions=pos_np, cell=cell_np, pbc=True)
+        # ase_nl returns (i, j, S) where S[k] is integer lattice-vector indices.
+        i_idx, j_idx, S = ase_nl("ijS", atoms, cutoff)
 
         edge_index = torch.tensor(
             np.stack([i_idx, j_idx], axis=0), dtype=torch.long, device=device
@@ -255,7 +258,10 @@ class UnifiedEquivariantMLIP(nn.Module):
         )
 
         h_scalar = self.species_embedding(species)
-        h = h_scalar.clone()
+        if self.input_proj is not None:
+            h = self.input_proj(h_scalar)
+        else:
+            h = h_scalar.clone()
 
         total_elec_energy: Optional[torch.Tensor] = None
         for block in self.blocks:
@@ -291,7 +297,9 @@ class UnifiedEquivariantMLIP(nn.Module):
                 outputs=[e_total.sum()],
                 inputs=[positions],
                 create_graph=self.training,
-                retain_graph=compute_stress,
+                # When training with force loss, the returned force tensor
+                # must stay connected for a later loss.backward().
+                retain_graph=(self.training or compute_stress),
                 allow_unused=True,
             )
             if grads[0] is not None:
