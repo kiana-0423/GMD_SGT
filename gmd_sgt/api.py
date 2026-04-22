@@ -137,6 +137,24 @@ def train(
 
     model_cfg = cfg.get("model", {})
     train_cfg = cfg.get("train", {})
+    model_type = str(model_cfg.get("type", "UnifiedEquivariantMLIP"))
+
+    if model_type == "AllegroStyleBackbone":
+        from gmd_sgt.training.train_backbone import train_backbone
+
+        return train_backbone(
+            train_config=cfg,
+            output_dir=output_dir_path,
+            resume_checkpoint=resume_checkpoint,
+        )
+    if model_type == "GMDSGTModel":
+        from gmd_sgt.training.train_residual import train_residual
+
+        return train_residual(
+            train_config=cfg,
+            output_dir=output_dir_path,
+            resume_checkpoint=resume_checkpoint,
+        )
 
     LOGGER.info("Starting training with dataset=%s output_dir=%s", dataset_path, output_dir)
 

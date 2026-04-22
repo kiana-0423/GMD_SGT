@@ -29,12 +29,13 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 
-from gmd_sgt.model import UnifiedEquivariantMLIP
+from gmd_sgt.models import load_model_from_checkpoint
 
 
 class MLIPCalculator:
-    """Numpy-interface calculator wrapping UnifiedEquivariantMLIP.
+    """Numpy-interface calculator wrapping a conservative MLIP model.
 
     Parameters
     ----------
@@ -44,7 +45,7 @@ class MLIPCalculator:
         Torch device string.
     """
 
-    def __init__(self, model: UnifiedEquivariantMLIP, device: str = "cpu"):
+    def __init__(self, model: nn.Module, device: str = "cpu"):
         self.model = model
         self.device = torch.device(device)
         self.model.to(self.device)
@@ -56,17 +57,10 @@ class MLIPCalculator:
     def from_checkpoint(cls, path: str, device: str = "cpu") -> "MLIPCalculator":
         """Load a checkpoint saved by Trainer.save_checkpoint().
 
-        The checkpoint must contain a 'model_config' key (guaranteed by
-        Trainer in gmd_sgt.training.trainer).
+        The checkpoint must contain a 'model_config' key and may optionally
+        carry a 'model_type' field for staged models.
         """
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
-        if "model_config" not in ckpt:
-            raise KeyError(
-                f"Checkpoint {path!r} is missing 'model_config'. "
-                "Re-train with the current Trainer to produce a valid checkpoint."
-            )
-        model = UnifiedEquivariantMLIP(**ckpt["model_config"])
-        model.load_state_dict(ckpt["model_state_dict"])
+        _, model = load_model_from_checkpoint(path, map_location="cpu")
         return cls(model, device=device)
 
     # ── Properties ───────────────────────────────────────────────────────────
@@ -74,12 +68,12 @@ class MLIPCalculator:
     @property
     def cutoff(self) -> float:
         """Short-range cutoff radius (Å). Queried by GMD to build neighbor list."""
-        return float(self.model.local_cutoff)
+        return float(getattr(self.model, "local_cutoff"))
 
     @property
     def lr_cutoff(self) -> float:
         """Long-range cutoff radius (Å)."""
-        return float(self.model.lr_cutoff)
+        return float(getattr(self.model, "lr_cutoff", self.cutoff))
 
     # ── Main interface ───────────────────────────────────────────────────────
 

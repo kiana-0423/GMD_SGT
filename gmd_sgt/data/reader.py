@@ -24,6 +24,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 
+from .validation import validate_structure_item
+
 
 # ── extended-XYZ ─────────────────────────────────────────────────────────────
 
@@ -138,7 +140,7 @@ def _atoms_to_dict(
             except Exception:
                 pass  # stress is optional
 
-    return item
+    return validate_structure_item(item)
 
 
 def _voigt_to_matrix(v: np.ndarray) -> np.ndarray:
@@ -216,7 +218,7 @@ def read_npz(path: str) -> List[Dict[str, torch.Tensor]]:
             item["stress"] = torch.from_numpy(
                 np.array(stress_arr[i], dtype=np.float32).reshape(3, 3)
             )
-        data_list.append(item)
+        data_list.append(validate_structure_item(item))
 
     print(f"[reader] Loaded {n_frames} structures from {path}")
     return data_list

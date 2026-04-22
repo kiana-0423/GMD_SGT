@@ -56,8 +56,21 @@ def collate_fn(
     """
     all_species, all_positions, all_forces = [], [], []
     all_energy, all_batch, all_n_atoms = [], [], []
-    has_stress = "stress" in batch[0]
-    has_cell = "cell" in batch[0]
+    has_stress_flags = ["stress" in item for item in batch]
+    has_cell_flags = ["cell" in item for item in batch]
+    has_stress = all(has_stress_flags)
+    has_cell = all(has_cell_flags)
+
+    # Prevent silent field drops or mid-batch key errors when optional
+    # labels are present only for a subset of structures.
+    if any(has_stress_flags) and not has_stress:
+        raise ValueError(
+            "Inconsistent batch: 'stress' must be present in all samples or none"
+        )
+    if any(has_cell_flags) and not has_cell:
+        raise ValueError(
+            "Inconsistent batch: 'cell' must be present in all samples or none"
+        )
     all_stress, all_cell = [], []
 
     for graph_id, item in enumerate(batch):

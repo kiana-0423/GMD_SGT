@@ -1,0 +1,46 @@
+# Stage 2: residual correction branches on top of a trained Stage 1 backbone
+
+model:
+  type: GMDSGTModel
+  backbone_checkpoint: outputs/stage1_backbone/ckpt_best.pt
+  use_gnn: true
+  gnn_hidden_channels: 64
+  gnn_layers: 2
+  use_transformer: false
+  transformer_hidden_channels: 64
+  transformer_layers: 1
+  transformer_heads: 4
+  transformer_dropout: 0.0
+  lambda_gnn: 1.0
+  lambda_attn: 1.0
+
+train:
+  device: cpu
+  seed: 42
+  n_epochs: 200
+  lr: 3.0e-4
+  lr_min: 3.0e-6
+  weight_decay: 1.0e-5
+  max_grad_norm: 1.0
+  warmup_steps: 200
+  batch_size: 4
+  val_fraction: 0.10
+  test_fraction: 0.00
+  patience: 30
+  w_energy: 1.0
+  w_force: 1.0
+  w_stress: 0.0
+  energy_loss: mae
+  force_loss: rmse
+  freeze_backbone: true
+  semi_freeze_backbone: false
+  dry_run: false
+  dry_run_frames: 12
+
+data:
+  train_file: data/train.extxyz
+  output_dir: outputs/stage2_residual
+  units:
+    energy: eV
+    force: eV/Angstrom
+    length: Angstrom

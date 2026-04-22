@@ -24,7 +24,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from gmd_sgt.model import UnifiedEquivariantMLIP
+from gmd_sgt.models import load_model_from_checkpoint
 
 
 class _ScriptWrapper(nn.Module):
@@ -36,11 +36,11 @@ class _ScriptWrapper(nn.Module):
       - Returns only energy and forces; no stress (stress requires virial from GMD)
     """
 
-    def __init__(self, model: UnifiedEquivariantMLIP):
+    def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
-        self.local_cutoff: float = model.local_cutoff
-        self.lr_cutoff: float = model.lr_cutoff
+        self.local_cutoff: float = float(getattr(model, "local_cutoff"))
+        self.lr_cutoff: float = float(getattr(model, "lr_cutoff", self.local_cutoff))
 
     def forward(
         self,
@@ -82,15 +82,7 @@ def export_torchscript(
     device:
         Device to run the export trace on ('cpu' recommended for portability).
     """
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if "model_config" not in ckpt:
-        raise KeyError(
-            f"Checkpoint {checkpoint_path!r} is missing 'model_config'. "
-            "Re-train with the current Trainer to produce a valid checkpoint."
-        )
-
-    model = UnifiedEquivariantMLIP(**ckpt["model_config"])
-    model.load_state_dict(ckpt["model_state_dict"])
+    _, model = load_model_from_checkpoint(checkpoint_path, map_location="cpu")
     model.eval()
     model.to(device)
 

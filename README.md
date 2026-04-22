@@ -124,6 +124,32 @@ best_checkpoint = train(
 print(best_checkpoint)
 ```
 
+### 2.1 Stage 1: Allegro-style local backbone
+
+最小 staged residual-learning 改造已先落地 Stage 1。该路径不会替换现有 `UnifiedEquivariantMLIP` 训练入口，而是新增一个独立入口：
+
+```bash
+python -m gmd_sgt.training.train_backbone --config configs/stage1_backbone.yaml
+```
+
+dry-run 小数据示例：
+
+```bash
+python -m gmd_sgt.training.train_backbone \
+  --config configs/stage1_backbone.yaml \
+  --dry-run
+```
+
+当前 Stage 1 特性：
+
+- 轻量 local `Allegro-style` backbone
+- Bessel radial basis + 方向基函数编码
+- 仅输出总能量 / 原子能
+- forces 统一由总能量自动微分得到
+- 复用现有 dataset / loss / trainer / checkpoint 机制
+
+后续 Stage 2-5 的 residual / committee / distillation 将继续在该 backbone 之上扩展，而不破坏现有默认训练链路。
+
 ### 3. 运行 smoke test
 
 ```bash

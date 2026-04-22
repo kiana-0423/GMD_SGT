@@ -6,7 +6,7 @@ import csv
 import math
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Type
+from typing import Dict, Optional, Type
 
 import torch
 import torch.nn as nn
@@ -192,6 +192,7 @@ class Trainer:
             "val_loss": val_loss,
             "best_val": self.best_val,
             "early_stopping_counter": self.early_stopping.counter,
+            "model_type": type(self.model).__name__,
             "model_config": self.model_config,          # ← critical for inference reload
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -203,7 +204,7 @@ class Trainer:
     def from_checkpoint(
         cls,
         checkpoint_path: str,
-        model_cls: Type[nn.Module],
+        model_cls: Optional[Type[nn.Module]] = None,
         **trainer_kwargs,
     ) -> "Trainer":
         """Resume training from a saved checkpoint.
@@ -218,8 +219,12 @@ class Trainer:
             Arguments forwarded to :class:`Trainer` (overrides checkpoint values).
             Must include at least ``loss_fn``, ``train_loader``, ``val_loader``.
         """
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         model_config = ckpt["model_config"]
+        if model_cls is None:
+            from gmd_sgt.models import get_model_class
+
+            model_cls = get_model_class(ckpt.get("model_type"))
         model = model_cls(**model_config)
         model.load_state_dict(ckpt["model_state_dict"])
 

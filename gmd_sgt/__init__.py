@@ -11,17 +11,24 @@ from .api import (
     train,
 )
 from .model import (
+    AllegroStyleBackbone,
+    AtomicEnergyReadout,
     BesselBasis,
     ElectrostaticCorrection,
     EquivariantLongRangeAttention,
     EquivariantLongRangeBlock,
+    GMDSGTModel,
+    GNNCorrection,
     InvariantScalarAttention,
     PolynomialCutoff,
     SE3EquivariantMessagePassing,
+    TransformerCorrection,
     UnifiedEquivariantMLIP,
 )
 
 __all__ = [
+    "AllegroStyleBackbone",
+    "AtomicEnergyReadout",
     "BesselBasis",
     "PolynomialCutoff",
     "SE3EquivariantMessagePassing",
@@ -29,6 +36,9 @@ __all__ = [
     "EquivariantLongRangeAttention",
     "ElectrostaticCorrection",
     "EquivariantLongRangeBlock",
+    "GNNCorrection",
+    "TransformerCorrection",
+    "GMDSGTModel",
     "OnlineMonitoringConfig",
     "OnlineMonitoringEnsembleConfig",
     "OnlinePredictor",
