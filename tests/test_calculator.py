@@ -47,8 +47,11 @@ def model_config():
 def checkpoint_path(model_config, tmp_path_factory):
     """Write a minimal checkpoint to a temp file."""
     from gmd_sgt.model import UnifiedEquivariantMLIP
+    from tests._helpers import randomize_energy_head
 
+    torch.manual_seed(0)
     model = UnifiedEquivariantMLIP(**model_config)
+    randomize_energy_head(model)  # the default zero head would make every test trivial
     tmp = tmp_path_factory.mktemp("ckpt") / "ckpt_test.pt"
     torch.save({
         "epoch": 1,
@@ -142,6 +145,7 @@ class TestCompute:
         species, positions = _water_cluster()
         result = calculator.compute(positions, species)
         assert np.all(np.isfinite(result["forces"]))
+        assert np.abs(result["forces"]).max() > 1e-4
 
     def test_deterministic(self, calculator):
         """Same input must give same output."""
@@ -169,7 +173,9 @@ class TestCompute:
             es = np.zeros((len(src), 3), dtype=np.float32)
             result = calculator.compute(positions, species,
                                         edge_index=ei, edge_shift=es)
-            assert "energy" in result
+            internal = calculator.compute(positions, species)
+            assert result["energy"] == pytest.approx(internal["energy"], rel=1e-6)
+            np.testing.assert_allclose(result["forces"], internal["forces"], atol=1e-6)
 
 
 # ── TorchScript export tests ──────────────────────────────────────────────────
@@ -202,6 +208,8 @@ class TestTorchScriptExport:
         assert "energy" in result
         assert "forces" in result
         assert result["forces"].shape == (N, 3)
+        # Without edges the energy is the sum of isolated-atom energies.
+        assert torch.count_nonzero(result["forces"]) == 0
 
     def test_export_output_matches_eager(self, checkpoint_path, tmp_path):
         """TorchScript forward must match eager MLIPCalculator output."""
@@ -234,7 +242,11 @@ class TestTorchScriptExport:
         r_script = scripted.forward(spc_t, pos_t, ei, es)
         e_script = float(r_script["energy"].sum().item())
 
-        assert e_script == pytest.approx(r_eager["energy"], rel=1e-4)
+        assert e_script == pytest.approx(r_eager["energy"], rel=1e-5)
+        np.testing.assert_allclose(
+            r_script["forces"].numpy(), r_eager["forces"], atol=1e-5, rtol=1e-4
+        )
+        assert np.abs(r_eager["forces"]).max() > 1e-4
 
 
 # ── ASE calculator integration ────────────────────────────────────────────────

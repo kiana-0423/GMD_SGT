@@ -2,18 +2,75 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from .blocks import EquivariantLongRangeBlock
-from .dependencies import CLUSTER_AVAILABLE, E3NN_AVAILABLE, o3, radius_graph
+from .blocks import LONG_RANGE_TYPES, EquivariantLongRangeBlock
+from .dependencies import E3NN_AVAILABLE, o3
+from .derivatives import conservative_outputs, make_strain
+from .geometry import (
+    build_neighbor_graph,
+    build_neighbor_graph_pbc,
+    compute_edge_geometry,
+    normalize_pbc,
+)
+from .message_passing import parse_scalar_irreps, spherical_harmonics_irreps
 from .radial import BesselBasis, PolynomialCutoff
+
+# Buffers of radial modules that older versions created but never used.
+_LEGACY_UNUSED_KEYS = ("radial_basis_lr.freq",)
+
+
+def _leading_scalar_count(irreps) -> int:
+    """Number of ``0e`` channels at the start of an e3nn irreps sequence."""
+    count = 0
+    for mul, ir in irreps:
+        if ir.l != 0 or ir.p != 1:
+            break
+        count += mul
+    return count
+
+
+def _unreachable_irreps(irreps, irreps_sh, n_blocks: int) -> List[str]:
+    """Irreps in ``irreps`` that message passing can never populate.
+
+    Features start as scalars only (``0e``); each block can reach
+    ``ir_in x ir_sh`` for any reachable ``ir_in``. Channels never reached
+    would stay identically zero.
+    """
+    targets = {ir for _, ir in irreps}
+    reachable = {o3.Irrep("0e")}
+    for _ in range(n_blocks):
+        new = set(reachable)
+        for ir_in in reachable:
+            for _, ir_sh in irreps_sh:
+                new.update(ir for ir in ir_in * ir_sh if ir in targets)
+        reachable = new
+    return sorted(str(ir) for ir in targets - reachable)
 
 
 class UnifiedEquivariantMLIP(nn.Module):
-    """Unified Equivariant Machine Learning Interatomic Potential."""
+    """Unified Equivariant Machine Learning Interatomic Potential.
+
+    Requirements and semantics
+    --------------------------
+    * ``irreps`` must start with at least ``scalar_dim`` copies of ``0e``; the
+      energy is read out from those invariant channels.
+    * Initial node features are species-dependent scalars only; all ``l > 0``
+      channels start at zero and are populated by tensor products with the
+      edge spherical harmonics (``l <= l_max``). Configurations in which some
+      declared irreps can never be populated are rejected.
+    * Without e3nn only a single scalar term ``"Nx0e"`` (``N >= scalar_dim``)
+      is supported; message passing is then an invariant, distance-dependent
+      continuous-filter convolution computed by e3nn-free modules that match
+      e3nn exactly, so such checkpoints load in either environment.
+      Non-scalar irreps raise ``ImportError``.
+    * Long-range attention is global within each structure and does not use
+      ``lr_cutoff`` (kept only for configuration/checkpoint compatibility).
+      ``"electrostatic"`` is non-periodic only.
+    """
 
     def __init__(
         self,
@@ -32,30 +89,81 @@ class UnifiedEquivariantMLIP(nn.Module):
         atomic_energies: Optional[Dict[int, float]] = None,
     ):
         super().__init__()
+        long_range_type = "none" if long_range_type is None else str(long_range_type)
+        if long_range_type not in LONG_RANGE_TYPES:
+            raise ValueError(
+                f"Unknown long_range_type {long_range_type!r}; expected one of {LONG_RANGE_TYPES}"
+            )
+        if int(l_max) != l_max or l_max < 0:
+            raise ValueError(f"l_max must be a non-negative integer, got {l_max!r}")
+        if local_cutoff <= 0:
+            raise ValueError(f"local_cutoff must be positive, got {local_cutoff}")
+        if lr_cutoff <= 0:
+            raise ValueError(f"lr_cutoff must be positive, got {lr_cutoff}")
 
         self.scalar_dim = scalar_dim
-        self.local_cutoff = local_cutoff
-        self.lr_cutoff = lr_cutoff
+        self.local_cutoff = float(local_cutoff)
+        # Informational only: no long-range module consumes it (see class doc).
+        self.lr_cutoff = float(lr_cutoff)
         self.long_range_type = long_range_type
-        self.l_max = l_max
+        self.l_max = int(l_max)
         self._use_e3nn = E3NN_AVAILABLE
 
         self.species_embedding = nn.Embedding(n_species, scalar_dim, padding_idx=0)
         if self._use_e3nn:
             irr = o3.Irreps(irreps)
+            if _leading_scalar_count(irr) < scalar_dim:
+                raise ValueError(
+                    f"irreps {irreps!r} must start with at least scalar_dim={scalar_dim} "
+                    "even scalars (0e) for the invariant energy readout"
+                )
+            unreachable = _unreachable_irreps(
+                irr, o3.Irreps(spherical_harmonics_irreps(self.l_max)), n_blocks
+            )
+            if unreachable:
+                raise ValueError(
+                    f"irreps {irreps!r} contain {unreachable}, which can never be populated "
+                    f"from scalar inputs with l_max={self.l_max} and n_blocks={n_blocks}; "
+                    "increase l_max/n_blocks or remove those irreps"
+                )
+            # Species information enters only through the 0e channels; a plain
+            # linear map into l > 0 components would not transform correctly.
             self.input_proj = nn.Linear(scalar_dim, irr.dim)
+            mask = torch.zeros(irr.dim)
+            for sl, (_, ir) in zip(irr.slices(), irr):
+                if ir.l == 0 and ir.p == 1:
+                    mask[sl] = 1.0
+            self.sh = o3.SphericalHarmonics(
+                o3.Irreps(spherical_harmonics_irreps(self.l_max)),
+                normalize=True,
+                normalization="component",
+            )
         else:
-            self.input_proj = None
+            n_scalars = parse_scalar_irreps(irreps)
+            if n_scalars is None:
+                raise ImportError(
+                    f"UnifiedEquivariantMLIP with irreps {irreps!r} requires e3nn. Install "
+                    "with pip install 'gmd-sgt[e3nn]', or use scalar-only irreps "
+                    f"(e.g. irreps='{scalar_dim}x0e') for the invariant fallback model."
+                )
+            n_terms = len([t for t in str(irreps).replace(" ", "").split("+") if t])
+            if n_terms != 1 or n_scalars < scalar_dim:
+                raise ValueError(
+                    "Without e3nn, irreps must be a single scalar term 'Nx0e' with "
+                    f"N >= scalar_dim={scalar_dim}; got {irreps!r}"
+                )
+            self.input_proj = nn.Linear(scalar_dim, n_scalars)
+            mask = torch.ones(n_scalars)
+            self.sh = None
+        self.register_buffer("input_irreps_mask", mask, persistent=False)
 
         self.radial_basis = BesselBasis(local_cutoff, n_basis)
         self.cutoff_env = PolynomialCutoff(local_cutoff)
-
-        if long_range_type not in ("none", None, "electrostatic"):
-            self.radial_basis_lr = BesselBasis(lr_cutoff, n_basis)
-            self.cutoff_env_lr = PolynomialCutoff(lr_cutoff)
-        else:
-            self.radial_basis_lr = None
-            self.cutoff_env_lr = None
+        # Kept as attributes for backward compatibility; attention is global
+        # and never used these modules.
+        self.radial_basis_lr = None
+        self.cutoff_env_lr = None
+        self._register_load_state_dict_pre_hook(self._drop_legacy_keys)
 
         self.blocks = nn.ModuleList(
             [
@@ -68,6 +176,7 @@ class UnifiedEquivariantMLIP(nn.Module):
                     hidden_radial=64,
                     avg_neighbors=avg_neighbors,
                     dropout=dropout,
+                    l_max=self.l_max,
                 )
                 for _ in range(n_blocks)
             ]
@@ -84,10 +193,15 @@ class UnifiedEquivariantMLIP(nn.Module):
         e_ref = torch.zeros(n_species)
         if atomic_energies is not None:
             for atomic_number, energy in atomic_energies.items():
-                e_ref[atomic_number] = energy
+                e_ref[int(atomic_number)] = energy
         self.register_buffer("atomic_energies_ref", e_ref)
 
         self._init_weights()
+
+    @staticmethod
+    def _drop_legacy_keys(state_dict, prefix, *args, **kwargs):
+        for key in _LEGACY_UNUSED_KEYS:
+            state_dict.pop(prefix + key, None)
 
     def _init_weights(self):
         for module in self.modules():
@@ -98,6 +212,7 @@ class UnifiedEquivariantMLIP(nn.Module):
         nn.init.zeros_(self.energy_head[-1].weight)
         nn.init.zeros_(self.energy_head[-1].bias)
 
+    @torch.jit.unused
     def build_neighbor_graph(
         self,
         positions: torch.Tensor,
@@ -106,97 +221,49 @@ class UnifiedEquivariantMLIP(nn.Module):
         cell: Optional[torch.Tensor] = None,
         pbc: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        del pbc
+        """Neighbor graph for non-periodic, fully or partially periodic batches."""
+        return build_neighbor_graph(
+            positions,
+            batch,
+            cutoff,
+            cell=cell,
+            pbc=pbc,
+            pbc_builder=self._build_neighbor_graph_pbc,
+        )
 
-        if cell is None:
-            if CLUSTER_AVAILABLE:
-                edge_index = radius_graph(positions, r=cutoff, batch=batch, loop=False)
-                return edge_index, None
-
-            diff = positions.unsqueeze(0) - positions.unsqueeze(1)
-            dist = diff.norm(dim=-1)
-            same_graph = batch.unsqueeze(0) == batch.unsqueeze(1)
-            edge_mask = (dist < cutoff) & (dist > 0) & same_graph
-            src, dst = edge_mask.nonzero(as_tuple=True)
-            edge_index = torch.stack([src, dst], dim=0)
-            return edge_index, None
-
-        # ── PBC path: delegate to ASE neighbor list ──────────────────────────
-        if cell.dim() == 2:
-            # Single structure (e.g. from MLIPCalculator.compute())
-            return self._build_neighbor_graph_pbc(positions, cell, cutoff)
-
-        # Batched structures from collate_fn: cell is [n_graphs, 3, 3].
-        # Build per-graph neighbor tables and concatenate with offset indices.
-        n_graphs = cell.shape[0]
-        expected_graphs = int(batch.max().item()) + 1
-        if n_graphs != expected_graphs:
-            raise ValueError(
-                f"cell has {n_graphs} graphs but batch encodes {expected_graphs} graphs"
-            )
-
-        all_ei = []
-        all_es = []
-        offset = 0
-        for g in range(n_graphs):
-            mask = batch == g
-            if not mask.any():
-                continue
-            pos_g = positions[mask]
-            ei_g, es_g = self._build_neighbor_graph_pbc(pos_g, cell[g], cutoff)
-            all_ei.append(ei_g + offset)
-            all_es.append(es_g)
-            offset += int(mask.sum().item())
-
-        if not all_ei:
-            return (
-                torch.zeros((2, 0), dtype=torch.long, device=positions.device),
-                torch.zeros((0, 3), dtype=positions.dtype, device=positions.device),
-            )
-
-        return torch.cat(all_ei, dim=1), torch.cat(all_es, dim=0)
-
+    @torch.jit.unused
     def _build_neighbor_graph_pbc(
         self,
         positions: torch.Tensor,
         cell: torch.Tensor,
         cutoff: float,
+        pbc: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Build PBC neighbor graph using ASE.
+        """Build a periodic neighbor graph for one structure using ASE.
 
         Returns
         -------
         edge_index : LongTensor [2, E]
         edge_shift : FloatTensor [E, 3]  Cartesian shift vectors (Å)
         """
-        try:
-            import numpy as np
-            from ase import Atoms
-            from ase.neighborlist import neighbor_list as ase_nl
-        except ImportError as exc:
-            raise ImportError(
-                "ASE is required for PBC neighbor lists. "
-                "Install with: pip install ase"
-            ) from exc
+        return build_neighbor_graph_pbc(positions, cell, cutoff, pbc)
 
-        device = positions.device
-        dtype = positions.dtype
-        pos_np = positions.detach().cpu().numpy()
-        cell_np = cell.detach().cpu().numpy()
-
-        # Use Atoms-based signature for ASE version compatibility.
-        atoms = Atoms(positions=pos_np, cell=cell_np, pbc=True)
-        # ase_nl returns (i, j, S) where S[k] is integer lattice-vector indices.
-        i_idx, j_idx, S = ase_nl("ijS", atoms, cutoff)
-
-        edge_index = torch.tensor(
-            np.stack([i_idx, j_idx], axis=0), dtype=torch.long, device=device
-        )
-        # S @ cell_np converts fractional shifts → Cartesian (Å)
-        edge_shift = torch.tensor(
-            S @ cell_np, dtype=dtype, device=device
-        )
-        return edge_index, edge_shift
+    def _edge_features(
+        self,
+        positions: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_shift: Optional[torch.Tensor],
+        strain: Optional[torch.Tensor] = None,
+        batch: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        _, r, r_hat = compute_edge_geometry(positions, edge_index, edge_shift, strain, batch)
+        if self.sh is not None:
+            edge_sh = self.sh(r_hat)
+        else:
+            edge_sh = r_hat
+        envelope = self.cutoff_env(r)
+        edge_rbf = self.radial_basis(r) * envelope.unsqueeze(-1)
+        return r, edge_sh, edge_rbf, envelope
 
     def compute_edge_features(
         self,
@@ -204,28 +271,59 @@ class UnifiedEquivariantMLIP(nn.Module):
         edge_index: torch.Tensor,
         edge_shift: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        src, dst = edge_index[0], edge_index[1]
-        r_vec = positions[dst] - positions[src]
-        if edge_shift is not None:
-            r_vec = r_vec + edge_shift
-        r = r_vec.norm(dim=-1)
-        r_hat = r_vec / (r.unsqueeze(-1) + 1e-8)
-
-        if E3NN_AVAILABLE:
-            edge_sh = o3.spherical_harmonics(
-                list(range(self.l_max + 1)),
-                r_hat,
-                normalize=True,
-                normalization="component",
-            )
-        else:
-            edge_sh = r_hat
-
-        rbf = self.radial_basis(r)
-        envelope = self.cutoff_env(r)
-        edge_rbf = rbf * envelope.unsqueeze(-1)
+        r, edge_sh, edge_rbf, _ = self._edge_features(positions, edge_index, edge_shift)
         return r, edge_sh, edge_rbf
 
+    def compute_energy(
+        self,
+        species: torch.Tensor,
+        positions: torch.Tensor,
+        batch: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_shift: Optional[torch.Tensor],
+        n_graphs: int,
+        strain: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Energy for an explicit graph (TorchScript-compatible)."""
+        n_atoms = positions.shape[0]
+        _, edge_sh, edge_rbf, envelope = self._edge_features(
+            positions, edge_index, edge_shift, strain, batch
+        )
+
+        h_scalar = self.species_embedding(species)
+        h = self.input_proj(h_scalar) * self.input_irreps_mask
+
+        total_elec_energy: Optional[torch.Tensor] = None
+        for block in self.blocks:
+            h, h_scalar, elec_energy = block.forward_with_energy(
+                h,
+                h_scalar,
+                edge_index,
+                edge_sh,
+                edge_rbf,
+                batch,
+                positions,
+                n_atoms,
+                envelope,
+            )
+            if elec_energy is not None:
+                if total_elec_energy is None:
+                    total_elec_energy = elec_energy
+                else:
+                    total_elec_energy = total_elec_energy + elec_energy
+
+        e_atomic = self.energy_head(h_scalar).squeeze(-1)
+        e_atomic = e_atomic + self.atomic_energies_ref[species]
+
+        e_total = torch.zeros(n_graphs, device=positions.device, dtype=e_atomic.dtype)
+        e_total = e_total.scatter_add(0, batch, e_atomic)
+
+        if total_elec_energy is not None:
+            e_total = e_total + total_elec_energy
+
+        return {"energy": e_total, "atomic_energies": e_atomic, "node_features": h_scalar}
+
+    @torch.jit.unused
     def forward(
         self,
         species: torch.Tensor,
@@ -236,12 +334,20 @@ class UnifiedEquivariantMLIP(nn.Module):
         cell: Optional[torch.Tensor] = None,
         compute_forces: bool = True,
         compute_stress: bool = False,
+        pbc: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         if compute_forces and not positions.requires_grad:
-            positions = positions.requires_grad_(True)
+            positions = positions.detach().requires_grad_(True)
 
-        n_atoms = positions.shape[0]
         n_graphs = int(batch.max().item()) + 1
+        periodic = cell is not None and bool(normalize_pbc(pbc, n_graphs).any())
+        if edge_shift is not None and bool((edge_shift != 0).any()):
+            periodic = True
+        if self.long_range_type == "electrostatic" and periodic:
+            raise ValueError(
+                "long_range_type='electrostatic' sums bare Coulomb pairs without periodic "
+                "images and is only valid for non-periodic structures"
+            )
 
         if edge_index is None:
             edge_index, edge_shift = self.build_neighbor_graph(
@@ -249,69 +355,23 @@ class UnifiedEquivariantMLIP(nn.Module):
                 batch,
                 self.local_cutoff,
                 cell=cell,
+                pbc=pbc,
             )
 
-        _, edge_sh, edge_rbf = self.compute_edge_features(
-            positions,
-            edge_index,
-            edge_shift,
+        strain = make_strain(compute_stress, n_graphs, positions, cell, pbc)
+        results = self.compute_energy(
+            species, positions, batch, edge_index, edge_shift, n_graphs, strain
         )
-
-        h_scalar = self.species_embedding(species)
-        if self.input_proj is not None:
-            h = self.input_proj(h_scalar)
-        else:
-            h = h_scalar.clone()
-
-        total_elec_energy: Optional[torch.Tensor] = None
-        for block in self.blocks:
-            h, h_scalar = block(
-                h=h,
-                h_scalar=h_scalar,
-                edge_index=edge_index,
-                edge_sh=edge_sh,
-                edge_radial=edge_rbf,
-                batch=batch,
+        results.update(
+            conservative_outputs(
+                energy=results["energy"],
                 positions=positions,
-                n_atoms=n_atoms,
-            )
-            if block._elec_energy is not None:
-                if total_elec_energy is None:
-                    total_elec_energy = block._elec_energy
-                else:
-                    total_elec_energy = total_elec_energy + block._elec_energy
-
-        e_atomic = self.energy_head(h_scalar).squeeze(-1)
-        e_atomic = e_atomic + self.atomic_energies_ref[species]
-
-        e_total = torch.zeros(n_graphs, device=positions.device, dtype=e_atomic.dtype)
-        e_total.scatter_add_(0, batch, e_atomic)
-
-        if total_elec_energy is not None:
-            e_total = e_total + total_elec_energy
-
-        results: Dict[str, torch.Tensor] = {"energy": e_total}
-
-        if compute_forces:
-            grads = torch.autograd.grad(
-                outputs=[e_total.sum()],
-                inputs=[positions],
+                strain=strain,
+                cell=cell,
+                compute_forces=compute_forces,
                 create_graph=self.training,
-                # When training with force loss, the returned force tensor
-                # must stay connected for a later loss.backward().
-                retain_graph=(self.training or compute_stress),
-                allow_unused=True,
             )
-            if grads[0] is not None:
-                results["forces"] = -grads[0]
-            else:
-                # Early in training the energy head may be position-independent.
-                # Return a stable zero-force tensor instead of dropping the key.
-                results["forces"] = torch.zeros_like(positions)
-
-        if compute_stress:
-            results["stress"] = None
-
+        )
         return results
 
 

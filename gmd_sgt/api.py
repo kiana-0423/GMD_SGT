@@ -6,7 +6,7 @@ import copy
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -19,6 +19,7 @@ except ImportError as exc:  # pragma: no cover - declared dependency
 
 from gmd_sgt.data import (
     AtomicDataset,
+    check_stress_labels,
     collate_fn,
     compute_per_species_energy_shift,
     split_dataset,
@@ -48,12 +49,16 @@ _ONLINE_MONITORING_DEFAULTS: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class StructureInput:
-    """Single structure input for online inference."""
+    """Single structure input for online inference.
+
+    ``pbc`` may be a single bool (applied to all axes) or three per-axis
+    flags; normalised inputs always carry a ``(bool, bool, bool)`` tuple.
+    """
 
     positions: np.ndarray
     species: np.ndarray
     cell: Optional[np.ndarray] = None
-    pbc: bool = False
+    pbc: Union[bool, tuple[bool, bool, bool]] = False
     edge_index: Optional[np.ndarray] = None
     edge_shift: Optional[np.ndarray] = None
 
@@ -161,6 +166,7 @@ def train(
     dataset = _load_dataset(dataset_path)
     if len(dataset) == 0:
         raise ValueError(f"Dataset {dataset_path!r} is empty")
+    check_stress_labels(dataset, float(train_cfg.get("w_stress", 0.0)))
 
     train_set, val_set, _ = split_dataset(
         dataset,
@@ -497,7 +503,7 @@ def _normalize_structure_input(
             None if structure.edge_shift is None
             else np.asarray(structure.edge_shift, dtype=np.float32)
         )
-        pbc = bool(structure.pbc)
+        pbc = _coerce_pbc(structure.pbc)
     else:
         if not isinstance(structure, Mapping):
             raise TypeError("structure must be a StructureInput or mapping")
@@ -525,6 +531,8 @@ def _normalize_structure_input(
         raise ValueError("positions and species must describe the same atom count")
     if cell is not None and cell.shape != (3, 3):
         raise ValueError("cell must have shape (3, 3)")
+    if any(pbc) and cell is None and edge_index is None:
+        raise ValueError("pbc requires a cell (or an explicit edge_index/edge_shift)")
     if edge_index is not None:
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
             raise ValueError("edge_index must have shape (2, E)")
@@ -561,10 +569,13 @@ def _coerce_species(species: Any, symbols: Any) -> np.ndarray:
     return np.asarray(resolved, dtype=np.int64)
 
 
-def _coerce_pbc(pbc: Any) -> bool:
-    if isinstance(pbc, (list, tuple, np.ndarray)):
-        return bool(np.any(np.asarray(pbc, dtype=bool)))
-    return bool(pbc)
+def _coerce_pbc(pbc: Any) -> tuple[bool, bool, bool]:
+    flags = np.asarray(pbc if pbc is not None else False, dtype=bool).reshape(-1)
+    if flags.size == 1:
+        flags = np.repeat(flags, 3)
+    if flags.size != 3:
+        raise ValueError("pbc must be a bool or a sequence of 3 bools")
+    return (bool(flags[0]), bool(flags[1]), bool(flags[2]))
 
 
 def _collect_unsupported_outputs(config: OnlineMonitoringConfig) -> list[str]:

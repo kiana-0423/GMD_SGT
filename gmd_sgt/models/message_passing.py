@@ -3,16 +3,54 @@
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
 
-from .dependencies import E3NN_AVAILABLE, SCATTER_AVAILABLE, o3, scatter_add
+from .dependencies import E3NN_AVAILABLE, o3
+from .geometry import scatter_sum
+from .scalar_irreps import ScalarLinear, ScalarTensorProduct
+
+
+def parse_scalar_irreps(irreps: str) -> Optional[int]:
+    """Total multiplicity of an irreps string made only of ``0e`` terms.
+
+    Returns ``None`` when any term is not an even scalar. Works without e3nn,
+    e.g. ``"16x0e"`` -> 16, ``"8x0e + 0e"`` -> 9, ``"8x0e + 2x1o"`` -> None.
+    """
+    total = 0
+    for term in str(irreps).replace(" ", "").split("+"):
+        if not term:
+            continue
+        mul_str, sep, ir = term.partition("x")
+        if not sep:
+            mul_str, ir = "1", term
+        if ir != "0e" or not mul_str.isdigit():
+            return None
+        total += int(mul_str)
+    return total
+
+
+def spherical_harmonics_irreps(l_max: int) -> str:
+    """Irreps of real spherical harmonics up to ``l_max`` (parity ``(-1)^l``)."""
+    if int(l_max) != l_max or l_max < 0:
+        raise ValueError(f"l_max must be a non-negative integer, got {l_max!r}")
+    return "+".join(f"1x{ell}{'e' if ell % 2 == 0 else 'o'}" for ell in range(int(l_max) + 1))
 
 
 class SE3EquivariantMessagePassing(nn.Module):
     """
     One round of SE(3)-equivariant message passing.
+
+    Messages are tensor products of sender features with the edge spherical
+    harmonics, weighted by a learned radial filter of the distance. Without
+    e3nn only scalar (``Nx0e``) irreps are supported; the tensor product then
+    reduces to a distance-dependent continuous-filter convolution, computed
+    by e3nn-free modules that match e3nn exactly (same parameters/outputs).
+
+    Messages are multiplied by ``edge_weight`` (the smooth cutoff envelope)
+    so they vanish continuously as edges leave the neighbor graph.
     """
 
     def __init__(
@@ -45,9 +83,17 @@ class SE3EquivariantMessagePassing(nn.Module):
             n_tp_weights = self.tp.weight_numel
             self.self_interaction = o3.Linear(irr_in, irr_out)
         else:
-            n_tp_weights = hidden_radial
-            scalar_dim = int(irreps_in.split("x0")[0])
-            self.self_interaction = nn.Linear(scalar_dim, scalar_dim)
+            dim_in = parse_scalar_irreps(irreps_in)
+            dim_out = parse_scalar_irreps(irreps_out)
+            if dim_in is None or dim_out is None:
+                raise ImportError(
+                    "Non-scalar irreps "
+                    f"({irreps_in!r} -> {irreps_out!r}) require e3nn. Install with "
+                    "pip install 'gmd-sgt[e3nn]' or use scalar-only irreps such as '64x0e'."
+                )
+            self.tp = ScalarTensorProduct(dim_in, dim_out)
+            n_tp_weights = self.tp.weight_numel
+            self.self_interaction = ScalarLinear(dim_in, dim_out)
 
         self.radial_net = nn.Sequential(
             nn.Linear(n_basis, hidden_radial),
@@ -64,29 +110,16 @@ class SE3EquivariantMessagePassing(nn.Module):
         edge_sh: torch.Tensor,
         edge_radial: torch.Tensor,
         n_atoms: int,
+        edge_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         src, dst = edge_index[0], edge_index[1]
         tp_weights = self.radial_net(edge_radial)
 
-        if E3NN_AVAILABLE:
-            messages = self.tp(h[src], edge_sh, tp_weights)
-
-            if SCATTER_AVAILABLE:
-                agg = scatter_add(messages, dst, dim=0, dim_size=n_atoms)
-            else:
-                agg = torch.zeros(
-                    n_atoms,
-                    messages.shape[-1],
-                    dtype=messages.dtype,
-                    device=messages.device,
-                )
-                agg.scatter_add_(0, dst.unsqueeze(-1).expand_as(messages), messages)
-            agg = agg / math.sqrt(self.avg_neighbors)
-
-            h_self = self.self_interaction(h)
-            return h_self + agg
-
-        return self.self_interaction(h)
+        messages = self.tp(h[src], edge_sh, tp_weights)
+        if edge_weight is not None:
+            messages = messages * edge_weight.unsqueeze(-1)
+        agg = scatter_sum(messages, dst, n_atoms) / math.sqrt(self.avg_neighbors)
+        return self.self_interaction(h) + agg
 
 
-__all__ = ["SE3EquivariantMessagePassing"]
+__all__ = ["SE3EquivariantMessagePassing", "parse_scalar_irreps", "spherical_harmonics_irreps"]

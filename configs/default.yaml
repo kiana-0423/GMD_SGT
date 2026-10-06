@@ -5,11 +5,11 @@ model:
   n_species: 100
   n_blocks: 4
   scalar_dim: 128
-  irreps: "128x0e + 64x1o + 32x2e"
+  irreps: "128x0e + 64x1o + 32x2e"   # requires e3nn; use "128x0e" without it
   l_max: 2
   n_basis: 8
   local_cutoff: 5.0       # Å, short-range cutoff
-  lr_cutoff: 12.0         # Å, long-range cutoff (unused if long_range_type=none)
+  lr_cutoff: 12.0         # Å, informational only: attention is global within each structure
   long_range_type: invariant_attention   # none | invariant_attention | equivariant_attention | electrostatic
   n_heads: 4
   avg_neighbors: 20.0

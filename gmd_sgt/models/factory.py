@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,12 @@ from .backbone_allegro_style import AllegroStyleBackbone
 from .core import UnifiedEquivariantMLIP
 from .gmd_sgt_model import GMDSGTModel
 
+# Bumped when model semantics change in a way that alters predictions of
+# previously trained weights. Version 2: smooth cutoff on every message,
+# envelope-weighted attention, scalar-only feature initialisation, l_max
+# consistent harmonics and corrected l=2 basis normalisation.
+CHECKPOINT_FORMAT_VERSION = 2
+
 MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "UnifiedEquivariantMLIP": UnifiedEquivariantMLIP,
     "AllegroStyleBackbone": AllegroStyleBackbone,
@@ -21,7 +28,10 @@ MODEL_REGISTRY: dict[str, type[nn.Module]] = {
 
 def get_model_class(model_type: str | None) -> type[nn.Module]:
     """Resolve a model class name from checkpoint metadata."""
-    return MODEL_REGISTRY.get(model_type or "UnifiedEquivariantMLIP", UnifiedEquivariantMLIP)
+    name = model_type or "UnifiedEquivariantMLIP"
+    if name not in MODEL_REGISTRY:
+        raise KeyError(f"Unknown model_type {name!r}; expected one of {sorted(MODEL_REGISTRY)}")
+    return MODEL_REGISTRY[name]
 
 
 def instantiate_model(model_type: str | None, model_config: dict[str, Any]) -> nn.Module:
@@ -47,4 +57,13 @@ def load_model_from_checkpoint(
         checkpoint["model_config"],
     )
     model.load_state_dict(checkpoint["model_state_dict"])
+    if int(checkpoint.get("format_version", 1)) < CHECKPOINT_FORMAT_VERSION:
+        warnings.warn(
+            f"Checkpoint {path!r} predates checkpoint format {CHECKPOINT_FORMAT_VERSION}. "
+            "Its weights load, but cutoff smoothing, attention normalisation and feature "
+            "initialisation have since been corrected, so predictions differ from the "
+            "original run; retrain or fine-tune before production use.",
+            UserWarning,
+            stacklevel=2,
+        )
     return checkpoint, model

@@ -115,12 +115,12 @@ def _atoms_to_dict(
         "n_atoms":   n_atoms,
     }
 
-    # Cell + PBC
+    # Cell + per-axis PBC (e.g. [True, True, False] for a slab)
     cell = np.array(atoms.get_cell(), dtype=np.float32)             # [3, 3]
-    pbc = atoms.get_pbc()
+    pbc = np.asarray(atoms.get_pbc(), dtype=bool)
     if pbc.any():
         item["cell"] = torch.from_numpy(cell)
-        item["pbc"] = torch.tensor(True)
+        item["pbc"] = torch.from_numpy(pbc.copy())
 
     # Stress (optional)
     if stress_key is not None:
@@ -164,8 +164,13 @@ def read_npz(path: str) -> List[Dict[str, torch.Tensor]]:
       Z          : [n_frames, n_atoms]     atomic numbers
       E          : [n_frames]              energies, eV
       F          : [n_frames, n_atoms, 3]  forces, eV/Å
-      stress     : [n_frames, 3, 3]        optional
+      stress     : [n_frames, 3, 3]        optional, eV/Å³ (ASE sign convention)
+      virial     : [n_frames, 3, 3]        optional, eV; converted to
+                                           stress = -virial / volume (needs cell)
       cell       : [n_frames, 3, 3]        optional
+      pbc        : [n_frames, 3] or [3]    optional per-axis periodicity
+                                           (default: fully periodic when a
+                                           cell is given)
 
     Also accepts the single-molecule convention where n_atoms varies per frame
     (stored as a ragged list of arrays).
@@ -190,8 +195,12 @@ def read_npz(path: str) -> List[Dict[str, torch.Tensor]]:
     energy_arr    = data[e_key]
     forces_arr    = data[f_key]
 
-    stress_arr = data.get("stress", data.get("virial", None))
-    cell_arr   = data.get("cell", None)
+    stress_arr = data["stress"] if "stress" in data else None
+    virial_arr = data["virial"] if "virial" in data else None
+    cell_arr   = data["cell"] if "cell" in data else None
+    pbc_arr    = data["pbc"] if "pbc" in data else None
+    if stress_arr is None and virial_arr is not None and cell_arr is None:
+        raise KeyError("NPZ provides 'virial' but no 'cell'; cannot convert to stress")
 
     n_frames = len(energy_arr)
     data_list = []
@@ -210,14 +219,27 @@ def read_npz(path: str) -> List[Dict[str, torch.Tensor]]:
             "n_atoms":   len(Z),
         }
         if cell_arr is not None:
-            item["cell"] = torch.from_numpy(
-                np.array(cell_arr[i], dtype=np.float32).reshape(3, 3)
-            )
-            item["pbc"] = torch.tensor(True)
+            cell_i = np.array(cell_arr[i], dtype=np.float32).reshape(3, 3)
+            if pbc_arr is None:
+                pbc_i = np.ones(3, dtype=bool)
+            else:
+                pbc_raw = np.asarray(pbc_arr, dtype=bool)
+                pbc_i = pbc_raw[i] if pbc_raw.ndim == 2 else pbc_raw
+                pbc_i = np.broadcast_to(pbc_i, (3,)).copy()
+            if pbc_i.any():
+                item["cell"] = torch.from_numpy(cell_i)
+                item["pbc"] = torch.from_numpy(pbc_i)
         if stress_arr is not None:
             item["stress"] = torch.from_numpy(
                 np.array(stress_arr[i], dtype=np.float32).reshape(3, 3)
             )
+        elif virial_arr is not None:
+            # NequIP/MACE convention: virial = -stress * volume.
+            volume = abs(float(np.linalg.det(np.asarray(cell_arr[i], dtype=np.float64).reshape(3, 3))))
+            if volume <= 0.0:
+                raise ValueError(f"frame {i}: cannot convert virial to stress for a zero-volume cell")
+            stress_i = -np.array(virial_arr[i], dtype=np.float64).reshape(3, 3) / volume
+            item["stress"] = torch.from_numpy(stress_i.astype(np.float32))
         data_list.append(validate_structure_item(item))
 
     print(f"[reader] Loaded {n_frames} structures from {path}")

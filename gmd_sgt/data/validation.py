@@ -55,14 +55,13 @@ def validate_structure_item(item: Dict[str, torch.Tensor]) -> Dict[str, torch.Te
 
     pbc_enabled = False
     if pbc is not None:
-        if isinstance(pbc, torch.Tensor):
-            pbc_enabled = bool(pbc.detach().cpu().to(dtype=torch.bool).any().item())
-        else:
-            try:
-                # Support sequence-like pbc values such as [True, False, True].
-                pbc_enabled = bool(any(bool(v) for v in pbc))
-            except TypeError:
-                pbc_enabled = bool(pbc)
+        # Accept a scalar flag or per-axis flags such as [True, True, False].
+        pbc_tensor = torch.as_tensor(pbc).detach().cpu().to(dtype=torch.bool)
+        if pbc_tensor.numel() not in (1, 3):
+            raise ValueError(
+                f"pbc must be a bool or have 3 entries, got shape {tuple(pbc_tensor.shape)}"
+            )
+        pbc_enabled = bool(pbc_tensor.any().item())
 
     if cell is not None and tuple(cell.shape) != (3, 3):
         raise ValueError(f"cell must have shape [3, 3], got {tuple(cell.shape)}")
@@ -78,3 +77,21 @@ def validate_structure_item(item: Dict[str, torch.Tensor]) -> Dict[str, torch.Te
         )
 
     return item
+
+
+def check_stress_labels(dataset, w_stress: float) -> None:
+    """Reject stress training when labels or periodic cells are missing."""
+    if w_stress <= 0:
+        return
+    for idx, item in enumerate(dataset):
+        if "stress" not in item:
+            raise ValueError(
+                f"w_stress={w_stress} > 0 but structure {idx} has no stress label; "
+                "set w_stress=0 or provide stress for every structure"
+            )
+        pbc = item.get("pbc")
+        if "cell" not in item or pbc is None or not bool(torch.as_tensor(pbc).any()):
+            raise ValueError(
+                f"w_stress={w_stress} > 0 but structure {idx} is not periodic; "
+                "stress is only defined for structures with a periodic cell"
+            )

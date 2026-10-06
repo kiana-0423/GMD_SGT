@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -32,6 +34,7 @@ class _ResidualMessageLayer(nn.Module):
         edge_index: torch.Tensor,
         edge_features: torch.Tensor,
         coordination: torch.Tensor,
+        edge_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         n_nodes = node_features.shape[0]
         src, dst = edge_index[0], edge_index[1]
@@ -47,6 +50,9 @@ class _ResidualMessageLayer(nn.Module):
             dim=-1,
         )
         messages = self.message_mlp(edge_input)
+        if edge_weight is not None:
+            # Smooth cutoff: messages must vanish as their edge leaves the graph.
+            messages = messages * edge_weight.unsqueeze(-1)
         aggregated = scatter_sum(messages, dst, n_nodes)
         update_input = torch.cat(
             [
@@ -93,7 +99,13 @@ class GNNCorrection(nn.Module):
         edge_index: torch.Tensor,
         edge_features: torch.Tensor,
         coordination: torch.Tensor,
+        edge_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Residual atomic energies.
+
+        ``edge_weight`` (the smooth cutoff envelope per edge) scales every
+        message so the correction is continuous when edges cross the cutoff.
+        """
         x = torch.cat(
             [
                 node_features,
@@ -104,10 +116,5 @@ class GNNCorrection(nn.Module):
         )
         x = self.input_proj(x)
         for layer in self.layers:
-            x = layer(
-                node_features=x,
-                edge_index=edge_index,
-                edge_features=edge_features,
-                coordination=coordination,
-            )
+            x = layer(x, edge_index, edge_features, coordination, edge_weight)
         return self.readout(x)

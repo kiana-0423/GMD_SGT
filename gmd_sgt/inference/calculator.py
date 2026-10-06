@@ -25,7 +25,7 @@ Usage
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -82,7 +82,7 @@ class MLIPCalculator:
         positions: np.ndarray,
         species: np.ndarray,
         cell: Optional[np.ndarray] = None,
-        pbc: bool = False,
+        pbc: Union[bool, Sequence[bool]] = False,
         edge_index: Optional[np.ndarray] = None,
         edge_shift: Optional[np.ndarray] = None,
         compute_stress: bool = False,
@@ -97,9 +97,11 @@ class MLIPCalculator:
             Atomic numbers (int).
         cell : np.ndarray [3, 3] or None
             Unit cell in Å. None = non-periodic system.
-        pbc : bool
-            Whether to apply periodic boundary conditions.
-            Ignored when edge_index is provided explicitly.
+        pbc : bool or sequence of 3 bools
+            Per-axis periodic boundary conditions; a single bool applies to
+            all axes. A cell is only used when at least one axis is
+            periodic. The neighbor list honours the flags unless edge_index
+            is provided explicitly.
         edge_index : np.ndarray [2, E] or None
             Pre-built neighbor list from external program (e.g. GMD).
             If None and cell is not None, built internally via ASE.
@@ -107,7 +109,9 @@ class MLIPCalculator:
             Cartesian PBC shift vectors (Å) corresponding to edge_index.
             Required when edge_index is provided.
         compute_stress : bool
-            Whether to compute the virial stress tensor [3, 3] eV/Å³.
+            Whether to compute the stress tensor [3, 3] eV/Å³,
+            ``(1/V) dE/d(strain)`` (ASE sign convention). Requires a periodic
+            cell.
 
         Returns
         -------
@@ -126,6 +130,11 @@ class MLIPCalculator:
         ei_t: Optional[torch.Tensor] = None
         es_t: Optional[torch.Tensor] = None
         cell_t: Optional[torch.Tensor] = None
+        pbc_flags = np.broadcast_to(np.asarray(pbc, dtype=bool).reshape(-1), (3,)).copy()
+        pbc_t = torch.tensor(pbc_flags, dtype=torch.bool, device=dev)
+
+        if cell is not None and pbc_flags.any():
+            cell_t = torch.tensor(np.asarray(cell), dtype=dtype, device=dev).reshape(3, 3)
 
         if edge_index is not None:
             if edge_shift is None:
@@ -136,8 +145,6 @@ class MLIPCalculator:
                 )
             ei_t = torch.tensor(edge_index, dtype=torch.long, device=dev)
             es_t = torch.tensor(edge_shift, dtype=dtype, device=dev)
-        elif cell is not None and pbc:
-            cell_t = torch.tensor(cell, dtype=dtype, device=dev)
 
         with torch.set_grad_enabled(True):
             out = self.model(
@@ -149,14 +156,15 @@ class MLIPCalculator:
                 cell=cell_t,
                 compute_forces=True,
                 compute_stress=compute_stress,
+                pbc=pbc_t,
             )
 
         result = {
             "energy": float(out["energy"].sum().item()),
             "forces": out["forces"].detach().cpu().numpy().astype(np.float64),
         }
-        if compute_stress and out.get("stress") is not None:
-            result["stress"] = out["stress"].detach().cpu().numpy().astype(np.float64)
+        if compute_stress:
+            result["stress"] = out["stress"].detach().cpu().numpy().astype(np.float64).reshape(3, 3)
 
         return result
 
@@ -183,18 +191,25 @@ class MLIPCalculator:
         mlip_calc = self  # closure
 
         class _ASECalc(Calculator):
-            implemented_properties = ["energy", "forces"]
+            implemented_properties = ["energy", "free_energy", "forces", "stress"]
 
             def calculate(self, atoms=None, properties=("energy", "forces"),
                           system_changes=all_changes):
                 super().calculate(atoms, properties, system_changes)
                 pos = atoms.get_positions().astype(np.float32)
                 spc = atoms.get_atomic_numbers()
-                cell = atoms.get_cell().array.astype(np.float32) \
-                    if any(atoms.get_pbc()) else None
-                pbc = bool(any(atoms.get_pbc()))
-                res = mlip_calc.compute(pos, spc, cell=cell, pbc=pbc)
+                pbc = np.asarray(atoms.get_pbc(), dtype=bool)
+                cell = atoms.get_cell().array.astype(np.float32) if pbc.any() else None
+                want_stress = "stress" in properties
+                res = mlip_calc.compute(
+                    pos, spc, cell=cell, pbc=pbc, compute_stress=want_stress
+                )
                 self.results["energy"] = res["energy"]
+                self.results["free_energy"] = res["energy"]
                 self.results["forces"] = res["forces"]
+                if want_stress:
+                    from ase.stress import full_3x3_to_voigt_6_stress
+
+                    self.results["stress"] = full_3x3_to_voigt_6_stress(res["stress"])
 
         return _ASECalc()

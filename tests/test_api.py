@@ -8,7 +8,6 @@ import torch
 
 from gmd_sgt.api import OnlinePredictor, export_model, predict, train
 from gmd_sgt.model import UnifiedEquivariantMLIP
-from gmd_sgt.training.trainer import Trainer
 
 
 @pytest.fixture(scope="module")
@@ -182,13 +181,7 @@ def test_latent_and_unsafe_disabled_return_none(checkpoint_path, structure):
     assert result.unsafe_probability is None
 
 
-def test_train_returns_model_path(dataset_path, tmp_path, monkeypatch):
-    def fake_run(self):
-        self.best_val = 0.0
-        self.save_checkpoint(epoch=1, val_loss=0.0, tag="best")
-
-    monkeypatch.setattr(Trainer, "run", fake_run)
-
+def test_train_returns_model_path(dataset_path, tmp_path):
     config = {
         "model": {
             "n_species": 10,
@@ -203,7 +196,7 @@ def test_train_returns_model_path(dataset_path, tmp_path, monkeypatch):
         },
         "train": {
             "device": "cpu",
-            "n_epochs": 1,
+            "n_epochs": 2,
             "batch_size": 2,
             "val_fraction": 0.25,
             "test_fraction": 0.25,
@@ -215,6 +208,9 @@ def test_train_returns_model_path(dataset_path, tmp_path, monkeypatch):
 
     assert Path(best_path).exists()
     assert Path(best_path).name == "ckpt_best.pt"
+    checkpoint = torch.load(best_path, weights_only=False)
+    assert checkpoint["model_type"] == "UnifiedEquivariantMLIP"
+    assert np.isfinite(checkpoint["val_loss"])
 
 
 def test_export_model_returns_artifact_path(checkpoint_path, tmp_path):
@@ -226,3 +222,11 @@ def test_export_model_returns_artifact_path(checkpoint_path, tmp_path):
 
     assert Path(exported).exists()
     assert Path(exported).name == "online_model.pt"
+    loaded = torch.jit.load(exported)
+    out = loaded(
+        torch.tensor([8, 1, 1]),
+        torch.tensor([[0.0, 0.0, 0.0], [0.757, 0.586, 0.0], [-0.757, 0.586, 0.0]]),
+        torch.tensor([[0, 1, 0, 2, 1, 2], [1, 0, 2, 0, 2, 1]]),
+        torch.zeros(6, 3),
+    )
+    assert out["energy"].dtype == torch.float64 and out["forces"].shape == (3, 3)

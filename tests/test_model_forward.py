@@ -10,7 +10,6 @@ from gmd_sgt.inference import MLIPCalculator
 from gmd_sgt.model import AllegroStyleBackbone, GMDSGTModel
 from gmd_sgt.training.train_backbone import train_backbone
 from gmd_sgt.training.train_residual import train_residual
-from gmd_sgt.training.trainer import Trainer
 
 
 def _model_config() -> dict:
@@ -39,9 +38,14 @@ def _structure():
     return species, positions, batch
 
 
-def _write_backbone_checkpoint(tmp_path, model_config: dict | None = None) -> Path:
+def _write_backbone_checkpoint(
+    tmp_path,
+    model_config: dict | None = None,
+    model: AllegroStyleBackbone | None = None,
+) -> Path:
     model_config = model_config or _model_config()
-    model = AllegroStyleBackbone(**model_config)
+    if model is None:
+        model = AllegroStyleBackbone(**model_config)
     checkpoint_path = tmp_path / "backbone_ckpt.pt"
     torch.save(
         {
@@ -116,7 +120,8 @@ def test_backbone_checkpoint_roundtrip_predictions_match(tmp_path):
             compute_forces=True,
         )
 
-    checkpoint_path = _write_backbone_checkpoint(tmp_path, model_config)
+    # Save the very model that produced the expected predictions.
+    checkpoint_path = _write_backbone_checkpoint(tmp_path, model_config, model=model)
 
     calculator = MLIPCalculator.from_checkpoint(str(checkpoint_path), device="cpu")
     result = calculator.compute(
@@ -131,15 +136,10 @@ def test_backbone_checkpoint_roundtrip_predictions_match(tmp_path):
         rtol=1e-6,
         atol=1e-6,
     )
+    assert np.abs(result["forces"]).max() > 0
 
 
-def test_train_backbone_dry_run_returns_checkpoint(tmp_path, monkeypatch):
-    def fake_run(self):
-        self.best_val = 0.0
-        self.save_checkpoint(epoch=1, val_loss=0.0, tag="best")
-
-    monkeypatch.setattr(Trainer, "run", fake_run)
-
+def test_train_backbone_dry_run_returns_checkpoint(tmp_path):
     best_path = train_backbone(
         {
             "model": _model_config(),
@@ -147,7 +147,7 @@ def test_train_backbone_dry_run_returns_checkpoint(tmp_path, monkeypatch):
                 "device": "cpu",
                 "dry_run": True,
                 "batch_size": 2,
-                "n_epochs": 1,
+                "n_epochs": 2,
                 "warmup_steps": 1,
             },
             "data": {
@@ -277,12 +277,7 @@ def test_residual_model_checkpoint_roundtrip_predictions_match(tmp_path):
     )
 
 
-def test_train_residual_dry_run_returns_checkpoint(tmp_path, monkeypatch):
-    def fake_run(self):
-        self.best_val = 0.0
-        self.save_checkpoint(epoch=1, val_loss=0.0, tag="best")
-
-    monkeypatch.setattr(Trainer, "run", fake_run)
+def test_train_residual_dry_run_returns_checkpoint(tmp_path):
     backbone_checkpoint = _write_backbone_checkpoint(tmp_path)
 
     best_path = train_residual(
@@ -300,7 +295,7 @@ def test_train_residual_dry_run_returns_checkpoint(tmp_path, monkeypatch):
                 "dry_run": True,
                 "freeze_backbone": True,
                 "batch_size": 2,
-                "n_epochs": 1,
+                "n_epochs": 2,
                 "warmup_steps": 1,
             },
             "data": {
@@ -311,3 +306,6 @@ def test_train_residual_dry_run_returns_checkpoint(tmp_path, monkeypatch):
 
     assert Path(best_path).exists()
     assert Path(best_path).name == "ckpt_best.pt"
+    checkpoint = torch.load(best_path, weights_only=False)
+    assert checkpoint["model_type"] == "GMDSGTModel"
+    assert checkpoint["epoch"] >= 1

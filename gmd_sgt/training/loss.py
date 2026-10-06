@@ -21,7 +21,11 @@ class EnergyForceLoss(nn.Module):
     ----------
     w_energy    : weight for energy term
     w_force     : weight for force term
-    w_stress    : weight for stress term (set 0 to disable)
+    w_stress    : weight for stress term (default 0 = disabled). When > 0 every
+                  batch must carry stress labels and the prediction must
+                  contain ``stress`` (``compute_stress=True``). The former
+                  default of 0.01 never had an effect because stress was not
+                  implemented, so 0 preserves the previous behaviour.
     energy_loss : 'mae' | 'mse' | 'huber'
     force_loss  : 'rmse' | 'mae' | 'huber'
     huber_delta : delta for Huber loss
@@ -31,7 +35,7 @@ class EnergyForceLoss(nn.Module):
         self,
         w_energy: float = 1.0,
         w_force: float = 1.0,
-        w_stress: float = 0.01,
+        w_stress: float = 0.0,
         energy_loss: str = "mae",
         force_loss: str = "rmse",
         huber_delta: float = 0.01,
@@ -54,7 +58,9 @@ class EnergyForceLoss(nn.Module):
 
     @staticmethod
     def _rmse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return ((pred - target) ** 2).mean().sqrt()
+        # sqrt has an infinite derivative at 0; the clamp keeps the gradient
+        # finite (zero) when the prediction is exact, e.g. zero forces.
+        return ((pred - target) ** 2).mean().clamp_min(1e-12).sqrt()
 
     def _huber(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return nn.functional.huber_loss(pred, target, delta=self.huber_delta)
@@ -95,13 +101,18 @@ class EnergyForceLoss(nn.Module):
             loss_dict["force"] = f_loss
             total = total + self.w_force * f_loss
 
-        # Stress loss
-        if (
-            self.w_stress > 0
-            and "stress" in pred
-            and pred["stress"] is not None
-            and "stress" in target
-        ):
+        # Stress loss (model stress = (1/V) dE/d(strain), ASE sign convention)
+        if self.w_stress > 0:
+            if "stress" not in target:
+                raise ValueError(
+                    "w_stress > 0 but the batch has no stress labels; set w_stress=0 "
+                    "or provide stress for every (periodic) structure"
+                )
+            if pred.get("stress") is None:
+                raise ValueError(
+                    "w_stress > 0 but the model output has no stress; "
+                    "call the model with compute_stress=True"
+                )
             s_loss = self._mae(pred["stress"], target["stress"])
             loss_dict["stress"] = s_loss
             total = total + self.w_stress * s_loss

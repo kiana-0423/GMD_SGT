@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from gmd_sgt.api import load_config
 from gmd_sgt.data import (
     AtomicDataset,
+    check_stress_labels,
     collate_fn,
     compute_per_species_energy_shift,
     split_dataset,
@@ -91,6 +92,7 @@ def train_backbone(
 
     if len(dataset) == 0:
         raise ValueError("Training dataset is empty")
+    check_stress_labels(dataset, float(train_cfg.get("w_stress", 0.0)))
 
     train_set, val_set, _ = split_dataset(
         dataset,

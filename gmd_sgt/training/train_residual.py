@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from gmd_sgt.api import load_config
-from gmd_sgt.data import collate_fn, split_dataset
+from gmd_sgt.data import check_stress_labels, collate_fn, split_dataset
 from gmd_sgt.model import GMDSGTModel
 from gmd_sgt.training.loss import EnergyForceLoss
 from gmd_sgt.training.train_backbone import _load_dataset, _make_dry_run_dataset
@@ -70,6 +70,7 @@ def train_residual(
 
     if len(dataset) == 0:
         raise ValueError("Training dataset is empty")
+    check_stress_labels(dataset, float(train_cfg.get("w_stress", 0.0)))
 
     train_set, val_set, _ = split_dataset(
         dataset,

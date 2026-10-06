@@ -1,5 +1,7 @@
 """gmd_sgt package."""
 
+__version__ = "0.3.0"
+
 from .api import (
     OnlineMonitoringConfig,
     OnlineMonitoringEnsembleConfig,
@@ -27,6 +29,7 @@ from .model import (
 )
 
 __all__ = [
+    "__version__",
     "AllegroStyleBackbone",
     "AtomicEnergyReadout",
     "BesselBasis",

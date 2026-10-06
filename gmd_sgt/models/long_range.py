@@ -1,14 +1,33 @@
-"""Long-range interaction modules."""
+"""Long-range interaction modules.
+
+Semantics
+---------
+The attention modules are *global within each structure*: every atom attends
+to every other atom of the same graph, independent of distance and without
+periodic images. They act on invariant (or equivariant) features that the
+local, cutoff-based message passing has already made PBC-aware, so the
+resulting energy is smooth and invariant to wrapping atoms into the cell.
+No long-range module uses a distance cutoff; ``lr_cutoff`` is therefore not
+consumed by any of them.
+
+:class:`ElectrostaticCorrection` sums a screened Coulomb kernel over all
+pairs of the same structure using bare positions. It is only valid for
+non-periodic structures (no Ewald summation), and the unified model rejects
+periodic inputs when it is enabled.
+"""
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .dependencies import E3NN_AVAILABLE, SCATTER_AVAILABLE, o3, scatter_mean
+from .dependencies import E3NN_AVAILABLE, o3
+from .geometry import scatter_sum
+from .message_passing import parse_scalar_irreps
+from .scalar_irreps import ScalarLinear
 
 
 class InvariantScalarAttention(nn.Module):
@@ -45,6 +64,16 @@ class InvariantScalarAttention(nn.Module):
         out = torch.einsum("ijh,jhd->ihd", attn, v).reshape(n_atoms, self.scalar_dim)
         return self.out_proj(out)
 
+    def block_forward(
+        self,
+        h: torch.Tensor,
+        h_scalar: torch.Tensor,
+        positions: Optional[torch.Tensor],
+        batch: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Uniform interface used by the interaction block: (s_lr, h_lr, energy)."""
+        return self.forward(h_scalar, batch), None, None
+
 
 class EquivariantLongRangeAttention(nn.Module):
     """Attention over full equivariant features with invariant weights."""
@@ -61,8 +90,11 @@ class EquivariantLongRangeAttention(nn.Module):
         if E3NN_AVAILABLE:
             self.v_proj = o3.Linear(o3.Irreps(irreps), o3.Irreps(irreps))
         else:
-            irr_scalar = int(irreps.split("x0")[0])
-            self.v_proj = nn.Linear(irr_scalar, irr_scalar)
+            # Without e3nn the features are scalars (``Nx0e``).
+            dim = parse_scalar_irreps(irreps)
+            if dim is None:
+                raise ImportError(f"Non-scalar irreps {irreps!r} require e3nn")
+            self.v_proj = ScalarLinear(dim, dim)
 
     def forward(
         self,
@@ -81,9 +113,20 @@ class EquivariantLongRangeAttention(nn.Module):
         v = self.v_proj(h)
         return torch.einsum("ij,jd->id", attn, v)
 
+    def block_forward(
+        self,
+        h: torch.Tensor,
+        h_scalar: torch.Tensor,
+        positions: Optional[torch.Tensor],
+        batch: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Uniform interface used by the interaction block: (s_lr, h_lr, energy)."""
+        h_lr = self.forward(h, h_scalar, batch)
+        return h_lr[:, : self.scalar_dim], h_lr, None
+
 
 class ElectrostaticCorrection(nn.Module):
-    """Physics-inspired screened Coulomb correction."""
+    """Physics-inspired screened Coulomb correction (non-periodic only)."""
 
     def __init__(self, scalar_dim: int, damping: float = 2.0):
         super().__init__()
@@ -103,40 +146,46 @@ class ElectrostaticCorrection(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         charges = self.charge_net(h_scalar).squeeze(-1)
 
-        if SCATTER_AVAILABLE:
-            q_mean = scatter_mean(charges, batch, dim=0)[batch]
-        else:
-            n_graphs = int(batch.max().item()) + 1
-            q_sum = torch.zeros(n_graphs, device=charges.device).scatter_add_(
-                0, batch, charges
-            )
-            n_per_graph = torch.zeros(n_graphs, device=charges.device).scatter_add_(
-                0, batch, torch.ones_like(charges)
-            )
-            q_mean = (q_sum / n_per_graph)[batch]
-        charges = charges - q_mean
+        n_graphs = int(batch.max().item()) + 1
+        q_sum = scatter_sum(charges.unsqueeze(-1), batch, n_graphs).squeeze(-1)
+        n_per_graph = scatter_sum(torch.ones_like(charges).unsqueeze(-1), batch, n_graphs).squeeze(-1)
+        charges = charges - (q_sum / n_per_graph)[batch]
 
         sigma = F.softplus(self.log_sigma) + 1e-4
-        n_graphs = int(batch.max().item()) + 1
-        e_elec = torch.zeros(n_graphs, device=positions.device)
 
         same_graph = batch.unsqueeze(0) == batch.unsqueeze(1)
-        diff = positions.unsqueeze(0) - positions.unsqueeze(1)
-        dist = diff.norm(dim=-1)
-        eye_mask = torch.eye(dist.shape[0], dtype=torch.bool, device=dist.device)
+        eye_mask = torch.eye(positions.shape[0], dtype=torch.bool, device=positions.device)
         mask = same_graph & ~eye_mask
+        diff = positions.unsqueeze(0) - positions.unsqueeze(1)
+        # Safe distance: masked pairs (including i == j) get a dummy value so
+        # the gradient of sqrt never sees zero.
+        dist_sq = torch.where(mask, (diff * diff).sum(-1), torch.ones_like(diff[..., 0]))
+        dist = dist_sq.sqrt()
 
         kernel = torch.where(
             mask,
-            torch.erfc(dist / sigma) / (dist + 1e-8),
+            torch.erfc(dist / sigma) / dist,
             torch.zeros_like(dist),
         )
         q_prod = charges.unsqueeze(0) * charges.unsqueeze(1)
         e_pair = 0.5 * q_prod * kernel
 
         e_per_atom = e_pair.sum(dim=1)
-        e_elec.scatter_add_(0, batch, e_per_atom)
+        e_elec = scatter_sum(e_per_atom.unsqueeze(-1), batch, n_graphs).squeeze(-1)
         return e_elec, charges
+
+    def block_forward(
+        self,
+        h: torch.Tensor,
+        h_scalar: torch.Tensor,
+        positions: Optional[torch.Tensor],
+        batch: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Uniform interface used by the interaction block: (s_lr, h_lr, energy)."""
+        if positions is None:
+            raise ValueError("positions required for electrostatic module")
+        energy, _ = self.forward(h_scalar, positions, batch)
+        return None, None, energy
 
 
 __all__ = [

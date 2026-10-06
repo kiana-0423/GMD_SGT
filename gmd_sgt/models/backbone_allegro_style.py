@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
+from .dependencies import E3NN_AVAILABLE, o3
+from .derivatives import conservative_outputs, make_strain
 from .geometry import (
+    MAX_CARTESIAN_L,
     build_neighbor_graph,
+    cartesian_spherical_harmonics,
     compute_edge_geometry,
-    directional_basis,
     scatter_sum,
+    split_spherical_harmonics,
 )
 from .radial import BesselBasis, PolynomialCutoff
 from .readout import AtomicEnergyReadout
@@ -60,7 +64,8 @@ class _LocalTensorProductLayer(nn.Module):
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
         edge_rbf: torch.Tensor,
-        basis_per_l: list[torch.Tensor],
+        basis_per_l: List[torch.Tensor],
+        edge_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         n_nodes = node_features.shape[0]
         src, dst = edge_index[0], edge_index[1]
@@ -74,10 +79,14 @@ class _LocalTensorProductLayer(nn.Module):
             dim=-1,
         )
         edge_message = self.filter_net(edge_input)
+        if edge_weight is not None:
+            # The filter MLP has biases, so it is non-zero at the cutoff; the
+            # smooth envelope makes each message vanish as its edge leaves.
+            edge_message = edge_message * edge_weight.unsqueeze(-1)
 
         scalar_agg = scatter_sum(edge_message, dst, n_nodes) / self.avg_neighbors
 
-        invariant_parts = []
+        invariant_parts: List[torch.Tensor] = []
         for basis in basis_per_l[1:]:
             # edge_message[:, :, None] * basis[:, None, :] -> [E, H, 2l+1]
             # reduce over incoming edges, then take squared norm over m to get
@@ -96,10 +105,10 @@ class _LocalTensorProductLayer(nn.Module):
 class AllegroStyleBackbone(nn.Module):
     """Local conservative backbone with Allegro-style directional interactions.
 
-    This is a lightweight, dependency-friendly implementation intended as the
-    first staged backbone. When ``e3nn`` is available it uses spherical
-    harmonics for directional encoding; otherwise it falls back to low-order
-    cartesian directional tensors while preserving the same interface.
+    Directional information enters through real spherical harmonics. Orders
+    ``l <= 2`` are evaluated in closed form (numerically identical to e3nn),
+    so the model needs e3nn only for ``l_max > 2``. Energies and invariant
+    descriptors are E(3)-invariant; forces are ``-dE/dr``.
     """
 
     def __init__(
@@ -114,18 +123,36 @@ class AllegroStyleBackbone(nn.Module):
         atomic_energies: Optional[Dict[int, float]] = None,
     ):
         super().__init__()
+        if int(l_max) != l_max or l_max < 0:
+            raise ValueError(f"l_max must be a non-negative integer, got {l_max!r}")
+        l_max = int(l_max)
+        if l_max > MAX_CARTESIAN_L and not E3NN_AVAILABLE:
+            raise ImportError(
+                f"AllegroStyleBackbone with l_max={l_max} requires e3nn; without it "
+                f"only l_max <= {MAX_CARTESIAN_L} is supported. "
+                "Install with: pip install 'gmd-sgt[e3nn]'"
+            )
+        if cutoff <= 0:
+            raise ValueError(f"cutoff must be positive, got {cutoff}")
+
         self.n_species = n_species
         self.hidden_channels = hidden_channels
         self.num_layers = num_layers
         self.n_basis = n_basis
-        self.local_cutoff = cutoff
-        self.lr_cutoff = cutoff
+        self.local_cutoff = float(cutoff)
+        self.lr_cutoff = float(cutoff)
         self.l_max = l_max
         self.avg_neighbors = avg_neighbors
 
         self.species_embedding = nn.Embedding(n_species, hidden_channels, padding_idx=0)
         self.radial_basis = BesselBasis(cutoff, n_basis)
         self.cutoff_env = PolynomialCutoff(cutoff)
+        # Stateless; only needed beyond the closed-form orders.
+        self.directional_sh = (
+            o3.SphericalHarmonics(list(range(l_max + 1)), normalize=True, normalization="component")
+            if l_max > MAX_CARTESIAN_L
+            else None
+        )
         self.layers = nn.ModuleList(
             [
                 _LocalTensorProductLayer(
@@ -145,6 +172,7 @@ class AllegroStyleBackbone(nn.Module):
                 energy_ref[int(atomic_number)] = float(energy)
         self.register_buffer("atomic_energies_ref", energy_ref)
 
+    @torch.jit.unused
     def build_neighbor_graph(
         self,
         positions: torch.Tensor,
@@ -162,47 +190,31 @@ class AllegroStyleBackbone(nn.Module):
             pbc=pbc,
         )
 
-    def forward(
+    def compute_energy(
         self,
         species: torch.Tensor,
         positions: torch.Tensor,
         batch: torch.Tensor,
-        edge_index: Optional[torch.Tensor] = None,
-        edge_shift: Optional[torch.Tensor] = None,
-        cell: Optional[torch.Tensor] = None,
-        neighbor_list: Optional[dict[str, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]] = None,
-        compute_forces: bool = True,
-        compute_stress: bool = False,
+        edge_index: torch.Tensor,
+        edge_shift: Optional[torch.Tensor],
+        n_graphs: int,
+        strain: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        del compute_stress
-
-        if compute_forces and not positions.requires_grad:
-            positions = positions.requires_grad_(True)
-
-        if neighbor_list is not None:
-            edge_index, edge_shift = self._resolve_neighbor_list(
-                neighbor_list=neighbor_list,
-                edge_index=edge_index,
-                edge_shift=edge_shift,
-                positions=positions,
-            )
-
-        if edge_index is None:
-            edge_index, edge_shift = self.build_neighbor_graph(
-                positions=positions,
-                batch=batch,
-                cutoff=self.local_cutoff,
-                cell=cell,
-            )
-
+        """Energy and intermediates for an explicit graph (TorchScript-compatible)."""
         _, distances, unit_vec = compute_edge_geometry(
             positions=positions,
             edge_index=edge_index,
             edge_shift=edge_shift,
+            strain=strain,
+            batch=batch,
         )
         envelope = self.cutoff_env(distances)
         edge_rbf = self.radial_basis(distances) * envelope.unsqueeze(-1)
-        basis_per_l = directional_basis(unit_vec, self.l_max)
+        if self.directional_sh is not None:
+            sh = self.directional_sh(unit_vec)
+        else:
+            sh = cartesian_spherical_harmonics(unit_vec, self.l_max)
+        basis_per_l = split_spherical_harmonics(sh, self.l_max)
         coordination = scatter_sum(
             envelope.unsqueeze(-1),
             edge_index[1],
@@ -212,41 +224,107 @@ class AllegroStyleBackbone(nn.Module):
         node_features = self.species_embedding(species)
         for layer in self.layers:
             node_features = layer(
-                node_features=node_features,
-                edge_index=edge_index,
-                edge_rbf=edge_rbf,
-                basis_per_l=basis_per_l,
+                node_features,
+                edge_index,
+                edge_rbf,
+                basis_per_l,
+                envelope,
             )
 
         atomic_energy = self.readout(node_features) + self.atomic_energies_ref[species]
-        n_graphs = int(batch.max().item()) + 1
         total_energy = scatter_sum(atomic_energy.unsqueeze(-1), batch, n_graphs).squeeze(-1)
 
-        output: Dict[str, torch.Tensor] = {
+        if edge_shift is None:
+            edge_shift = positions.new_zeros((edge_index.shape[1], 3))
+        return {
             "energy": total_energy,
             "atomic_energies": atomic_energy,
             "node_features": node_features,
             "edge_index": edge_index,
-            "edge_shift": (
-                edge_shift
-                if edge_shift is not None
-                else positions.new_zeros((edge_index.shape[1], 3))
-            ),
+            "edge_shift": edge_shift,
             "distances": distances,
             "edge_rbf": edge_rbf,
+            "edge_envelope": envelope,
             "coordination": coordination,
         }
 
-        if compute_forces:
-            grad = torch.autograd.grad(
-                outputs=[total_energy.sum()],
-                inputs=[positions],
-                create_graph=self.training,
-                retain_graph=False,
-                allow_unused=True,
-            )[0]
-            output["forces"] = -grad if grad is not None else torch.zeros_like(positions)
+    @torch.jit.unused
+    def resolve_edges(
+        self,
+        positions: torch.Tensor,
+        batch: torch.Tensor,
+        edge_index: Optional[torch.Tensor] = None,
+        edge_shift: Optional[torch.Tensor] = None,
+        cell: Optional[torch.Tensor] = None,
+        pbc: Optional[torch.Tensor] = None,
+        neighbor_list: Any = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Return the explicit graph, building it when none was supplied."""
+        if neighbor_list is not None:
+            edge_index, edge_shift = self._resolve_neighbor_list(
+                neighbor_list=neighbor_list,
+                edge_index=edge_index,
+                edge_shift=edge_shift,
+                positions=positions,
+            )
+        if edge_index is None:
+            edge_index, edge_shift = self.build_neighbor_graph(
+                positions=positions,
+                batch=batch,
+                cutoff=self.local_cutoff,
+                cell=cell,
+                pbc=pbc,
+            )
+        return edge_index, edge_shift
 
+    @torch.jit.unused
+    def forward(
+        self,
+        species: torch.Tensor,
+        positions: torch.Tensor,
+        batch: torch.Tensor,
+        edge_index: Optional[torch.Tensor] = None,
+        edge_shift: Optional[torch.Tensor] = None,
+        cell: Optional[torch.Tensor] = None,
+        neighbor_list: Any = None,
+        compute_forces: bool = True,
+        compute_stress: bool = False,
+        pbc: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        if compute_forces and not positions.requires_grad:
+            positions = positions.detach().requires_grad_(True)
+
+        edge_index, edge_shift = self.resolve_edges(
+            positions=positions,
+            batch=batch,
+            edge_index=edge_index,
+            edge_shift=edge_shift,
+            cell=cell,
+            pbc=pbc,
+            neighbor_list=neighbor_list,
+        )
+        n_graphs = int(batch.max().item()) + 1
+        strain = make_strain(compute_stress, n_graphs, positions, cell, pbc)
+
+        output = self.compute_energy(
+            species=species,
+            positions=positions,
+            batch=batch,
+            edge_index=edge_index,
+            edge_shift=edge_shift,
+            n_graphs=n_graphs,
+            strain=strain,
+        )
+        output.update(
+            conservative_outputs(
+                energy=output["energy"],
+                positions=positions,
+                strain=strain,
+                cell=cell,
+                compute_forces=compute_forces,
+                create_graph=self.training,
+            )
+        )
         return output
 
     @staticmethod

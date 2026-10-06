@@ -11,7 +11,10 @@ except ImportError:
     o3 = None
     IrrepsBatchNorm = None
     E3NN_AVAILABLE = False
-    print("[WARNING] e3nn not found. Equivariant tensor products will use PLACEHOLDERS.")
+    print(
+        "[WARNING] e3nn not found. Only scalar-irreps UnifiedEquivariantMLIP and "
+        "l_max <= 2 backbones are available."
+    )
 
 try:
     from torch_scatter import scatter_add, scatter_mean
@@ -21,7 +24,7 @@ except ImportError:
     scatter_add = None
     scatter_mean = None
     SCATTER_AVAILABLE = False
-    print("[WARNING] torch_scatter not found. Using torch.scatter_add_ fallback.")
+    print("[WARNING] torch_scatter not found (not required; pure-torch scatter is used).")
 
 try:
     from torch_cluster import radius_graph
@@ -30,7 +33,7 @@ try:
 except ImportError:
     radius_graph = None
     CLUSTER_AVAILABLE = False
-    print("[WARNING] torch_cluster not found. Neighbor graph construction disabled.")
+    print("[WARNING] torch_cluster not found. Using the dense O(N^2) neighbor search.")
 
 __all__ = [
     "CLUSTER_AVAILABLE",

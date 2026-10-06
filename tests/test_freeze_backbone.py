@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from gmd_sgt.model import GMDSGTModel
@@ -69,43 +70,83 @@ def test_semi_freeze_backbone_keeps_readout_trainable():
     assert frozen_names
 
 
-def test_frozen_backbone_parameters_do_not_update_after_step():
+def _float_state(module):
+    return {
+        name: tensor.detach().clone()
+        for name, tensor in module.state_dict().items()
+        if torch.is_tensor(tensor) and tensor.is_floating_point()
+    }
+
+
+@pytest.mark.parametrize("policy", ["frozen", "semi_frozen", "unfrozen"])
+def test_energy_force_optimizer_step_respects_freeze_policy(policy):
+    """A real training step with energy *and* force supervision.
+
+    Needs the force graph to survive until ``loss.backward()`` (previously it
+    was freed by ``retain_graph=False``) and must only move trainable params.
+    """
+    torch.manual_seed(0)
     model = _hybrid_model()
-    model.freeze_backbone()
+    if policy == "frozen":
+        model.freeze_backbone()
+    elif policy == "semi_frozen":
+        model.semi_freeze_backbone()
+    model.train()
     species, positions, batch = _structure()
 
-    backbone_before = {
-        name: tensor.detach().clone()
-        for name, tensor in model.backbone.state_dict().items()
-        if torch.is_tensor(tensor)
-        and (tensor.is_floating_point() or tensor.is_complex())
-    }
-    branch_before = {
-        name: tensor.detach().clone()
-        for name, tensor in model.gnn_correction.state_dict().items()
-        if torch.is_tensor(tensor)
-        and (tensor.is_floating_point() or tensor.is_complex())
-    }
+    backbone_before = _float_state(model.backbone)
+    branch_before = _float_state(model.gnn_correction)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
-    optimizer.zero_grad()
-    out = model(
-        species=species,
-        positions=positions,
-        batch=batch,
-        compute_forces=True,
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad], lr=1e-2
     )
+    optimizer.zero_grad()
+    out = model(species=species, positions=positions, batch=batch, compute_forces=True)
+    assert out["forces"].requires_grad, "force graph must be kept for the force loss"
     target_energy = torch.tensor([1.5], dtype=out["energy"].dtype)
-    loss = ((out["energy"] - target_energy) ** 2).mean() + 0.1 * out["forces"].pow(2).mean()
+    target_forces = torch.full_like(out["forces"], 0.3)
+    loss = ((out["energy"] - target_energy) ** 2).mean() + (
+        (out["forces"] - target_forces) ** 2
+    ).mean()
     loss.backward()
+
+    # The force term alone must reach the trainable parameters.
+    grads = [p.grad for p in model.gnn_correction.parameters() if p.grad is not None]
+    assert grads and any(g.abs().sum() > 0 for g in grads)
     optimizer.step()
 
-    for name, tensor in model.backbone.state_dict().items():
-        if name in backbone_before:
-            assert torch.allclose(tensor, backbone_before[name])
+    backbone_after = _float_state(model.backbone)
+    changed = {k for k in backbone_before if not torch.equal(backbone_before[k], backbone_after[k])}
+    if policy == "frozen":
+        assert changed == set()
+    elif policy == "semi_frozen":
+        assert changed and all(k.startswith("readout.") for k in changed)
+    else:
+        assert any(not k.startswith("readout.") for k in changed)
 
-    assert any(
-        not torch.allclose(tensor, branch_before[name])
-        for name, tensor in model.gnn_correction.state_dict().items()
-        if name in branch_before
-    )
+    branch_after = _float_state(model.gnn_correction)
+    assert any(not torch.equal(branch_before[k], branch_after[k]) for k in branch_before)
+
+
+@pytest.mark.parametrize("model_name", ["backbone", "unified"])
+def test_single_model_energy_force_step(model_name):
+    from tests._helpers import make_backbone, make_unified
+
+    model = make_backbone() if model_name == "backbone" else make_unified()
+    model.train()
+    species, positions, batch = _structure()
+    before = _float_state(model)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
+    out = model(species=species, positions=positions, batch=batch, compute_forces=True)
+    loss = (out["energy"] - 1.0).pow(2).mean() + (out["forces"] - 0.2).pow(2).mean()
+    loss.backward()
+    optimizer.step()
+    after = _float_state(model)
+    assert any(not torch.equal(before[k], after[k]) for k in before)
+
+
+def test_inference_frees_the_force_graph():
+    model = _hybrid_model().eval()
+    species, positions, batch = _structure()
+    out = model(species=species, positions=positions, batch=batch, compute_forces=True)
+    assert not out["forces"].requires_grad

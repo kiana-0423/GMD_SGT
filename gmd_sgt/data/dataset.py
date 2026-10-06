@@ -18,7 +18,8 @@ class AtomicDataset(torch.utils.data.Dataset):
       forces    : [n_atoms, 3]  float32  atomic forces, eV/Å
       stress    : [3, 3]        float32  virial stress, eV/Å³  (optional)
       cell      : [3, 3]        float32  unit cell, Å  (optional, for PBC)
-      pbc       : bool          periodic boundary conditions flag  (optional)
+      pbc       : [3] bool      per-axis periodicity (optional; a scalar bool
+                                is accepted and broadcast to all axes)
       n_atoms   : int           number of atoms (for convenience)
 
     Build via:
@@ -71,7 +72,7 @@ def collate_fn(
         raise ValueError(
             "Inconsistent batch: 'cell' must be present in all samples or none"
         )
-    all_stress, all_cell = [], []
+    all_stress, all_cell, all_pbc = [], [], []
 
     for graph_id, item in enumerate(batch):
         n = item["species"].shape[0]
@@ -85,6 +86,10 @@ def collate_fn(
             all_stress.append(item["stress"].reshape(1, 3, 3))
         if has_cell:
             all_cell.append(item["cell"].reshape(1, 3, 3))
+            pbc = item.get("pbc")
+            # A cell without explicit flags historically meant fully periodic.
+            pbc = torch.ones(3, dtype=torch.bool) if pbc is None else torch.as_tensor(pbc)
+            all_pbc.append(pbc.to(torch.bool).reshape(-1).expand(3).reshape(1, 3))
 
     out = {
         "species":   torch.cat(all_species,   dim=0),
@@ -98,4 +103,5 @@ def collate_fn(
         out["stress"] = torch.cat(all_stress, dim=0)   # [n_graphs, 3, 3]
     if has_cell:
         out["cell"] = torch.cat(all_cell, dim=0)        # [n_graphs, 3, 3]
+        out["pbc"] = torch.cat(all_pbc, dim=0)          # [n_graphs, 3]
     return out

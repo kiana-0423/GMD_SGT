@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
 
 from .backbone_allegro_style import AllegroStyleBackbone
+from .derivatives import conservative_outputs, make_strain
 from .geometry import scatter_sum
 from .gnn_correction import GNNCorrection
 from .transformer_correction import TransformerCorrection
@@ -105,33 +106,25 @@ class GMDSGTModel(nn.Module):
         for param in self.backbone.readout.parameters():
             param.requires_grad = True
 
-    def forward(
+    def compute_energy(
         self,
         species: torch.Tensor,
         positions: torch.Tensor,
         batch: torch.Tensor,
-        edge_index: Optional[torch.Tensor] = None,
-        edge_shift: Optional[torch.Tensor] = None,
-        cell: Optional[torch.Tensor] = None,
-        neighbor_list: Optional[dict[str, torch.Tensor] | tuple[torch.Tensor, torch.Tensor]] = None,
-        compute_forces: bool = True,
-        compute_stress: bool = False,
+        edge_index: torch.Tensor,
+        edge_shift: Optional[torch.Tensor],
+        n_graphs: int,
+        strain: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        del compute_stress
-
-        if compute_forces and not positions.requires_grad:
-            positions = positions.requires_grad_(True)
-
-        backbone_out = self.backbone(
-            species=species,
-            positions=positions,
-            batch=batch,
-            edge_index=edge_index,
-            edge_shift=edge_shift,
-            cell=cell,
-            neighbor_list=neighbor_list,
-            compute_forces=False,
-            compute_stress=False,
+        """Energy decomposition for an explicit graph (TorchScript-compatible)."""
+        backbone_out = self.backbone.compute_energy(
+            species,
+            positions,
+            batch,
+            edge_index,
+            edge_shift,
+            n_graphs,
+            strain,
         )
 
         atomic_backbone = backbone_out["atomic_energies"]
@@ -142,29 +135,31 @@ class GMDSGTModel(nn.Module):
             ],
             dim=-1,
         )
+        edge_weight = backbone_out["edge_envelope"]
         coordination = backbone_out["coordination"]
-        edge_index = backbone_out["edge_index"]
-        n_graphs = int(batch.max().item()) + 1
+        node_features = backbone_out["node_features"]
 
         delta_atomic_gnn = torch.zeros_like(atomic_backbone)
         delta_atomic_attn = torch.zeros_like(atomic_backbone)
 
         if self.gnn_correction is not None:
             delta_atomic_gnn = self.gnn_correction(
-                node_features=backbone_out["node_features"],
-                species=species,
-                edge_index=edge_index,
-                edge_features=edge_features,
-                coordination=coordination,
+                node_features,
+                species,
+                edge_index,
+                edge_features,
+                coordination,
+                edge_weight,
             )
 
         if self.transformer_correction is not None:
             delta_atomic_attn = self.transformer_correction(
-                node_features=backbone_out["node_features"],
-                species=species,
-                edge_index=edge_index,
-                edge_features=edge_features,
-                coordination=coordination,
+                node_features,
+                species,
+                edge_index,
+                edge_features,
+                coordination,
+                edge_weight,
             )
 
         atomic_total = (
@@ -189,7 +184,7 @@ class GMDSGTModel(nn.Module):
             n_graphs,
         ).squeeze(-1)
 
-        output: Dict[str, torch.Tensor] = {
+        return {
             "energy": energy_total,
             "energy_backbone": energy_backbone,
             "delta_energy_gnn": delta_energy_gnn,
@@ -200,14 +195,52 @@ class GMDSGTModel(nn.Module):
             "delta_atomic_attn": delta_atomic_attn,
         }
 
-        if compute_forces:
-            grad = torch.autograd.grad(
-                outputs=[energy_total.sum()],
-                inputs=[positions],
-                create_graph=self.training,
-                retain_graph=False,
-                allow_unused=True,
-            )[0]
-            output["forces"] = -grad if grad is not None else torch.zeros_like(positions)
+    @torch.jit.unused
+    def forward(
+        self,
+        species: torch.Tensor,
+        positions: torch.Tensor,
+        batch: torch.Tensor,
+        edge_index: Optional[torch.Tensor] = None,
+        edge_shift: Optional[torch.Tensor] = None,
+        cell: Optional[torch.Tensor] = None,
+        neighbor_list: Any = None,
+        compute_forces: bool = True,
+        compute_stress: bool = False,
+        pbc: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        if compute_forces and not positions.requires_grad:
+            positions = positions.detach().requires_grad_(True)
 
+        edge_index, edge_shift = self.backbone.resolve_edges(
+            positions=positions,
+            batch=batch,
+            edge_index=edge_index,
+            edge_shift=edge_shift,
+            cell=cell,
+            pbc=pbc,
+            neighbor_list=neighbor_list,
+        )
+        n_graphs = int(batch.max().item()) + 1
+        strain = make_strain(compute_stress, n_graphs, positions, cell, pbc)
+
+        output = self.compute_energy(
+            species=species,
+            positions=positions,
+            batch=batch,
+            edge_index=edge_index,
+            edge_shift=edge_shift,
+            n_graphs=n_graphs,
+            strain=strain,
+        )
+        output.update(
+            conservative_outputs(
+                energy=output["energy"],
+                positions=positions,
+                strain=strain,
+                cell=cell,
+                compute_forces=compute_forces,
+                create_graph=self.training,
+            )
+        )
         return output
